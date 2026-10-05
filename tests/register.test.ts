@@ -406,9 +406,32 @@ describe('hands off Claude', () => {
     await w.clock.advance(1_000)
     expect(signals().length).toBe(1)
     w.front = game.pid
-    await w.clock.advance(1_000)
+    await w.clock.advance(1_500)
+    // Back in the game, but the grace (2.5 s by default) has not run out.
+    expect(signals().length).toBe(1)
+    await w.clock.advance(2_000)
     expect(signals()).toEqual([`-STOP ${game.pid + 10_000}`, `-CONT ${game.pid + 10_000}`])
     expect(game.alive).toBe(true)
+  })
+
+  test('macOS: leaving again during the grace restarts it', { options: { resumeDelaySeconds: 2 } }, async ($, on) => {
+    const w = makeWorld(on)
+    const game = await openGame($, w)
+    w.front = game.pid
+    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' } })
+    await w.clock.advance(100)
+    w.front = 999
+    await w.clock.advance(1_000)
+    w.front = game.pid
+    await w.clock.advance(1_000)
+    w.front = 999
+    await w.clock.advance(1_000)
+    w.front = game.pid
+    await w.clock.advance(1_000)
+    const conts = () => w.runs.filter(r => r.argv[0] === '/bin/kill' && r.argv[1] === '-CONT')
+    expect(conts().length).toBe(0)
+    await w.clock.advance(2_000)
+    expect(conts().length).toBe(1)
   })
 
   test('Windows: when Claude needs you the launcher is told to hold the fight', async ($, on) => {
@@ -417,7 +440,8 @@ describe('hands off Claude', () => {
     expect(game.argv).toContain('--disable-hang-monitor')
     const script = decodeScript(w.spawns[0]?.argv ?? []) ?? ''
     expect(script).toContain('NtSuspendProcess')
-    expect(script).toContain('if ($hold -or -not $isFront) { Freeze-Game } else { Thaw-Game }')
+    expect(script).toContain('if ($hold -or -not $isFront -or $waiting) { Freeze-Game } else { $resumeAt = $null; Thaw-Game }')
+    expect(w.spawns[0]?.env?.BADTIME_RESUME_MS).toBe('2500')
     await $.tool.call({ tool: 'AskUserQuestion', questions: [] } as never)
     await w.clock.advance(100)
     expect([...w.files.values()].at(-1)).toBe('hold 1')

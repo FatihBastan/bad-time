@@ -31,6 +31,7 @@ type Config = {
   delayMs: number
   mode: Mode
   countdownMs: number
+  resumeMs: number
   sounds: boolean
   strayKeyGuard: boolean
   windowSize: string
@@ -169,6 +170,9 @@ const WINDOWS_LAUNCHER = [
   "try { Show-Game } catch { [Console]::Error.WriteLine('bad-time-front ' + $_) }",
   '$hold = $false',
   '$wasFront = $true',
+  '$resumeAt = $null',
+  '$grace = 0',
+  'if ($env:BADTIME_RESUME_MS -match \'^[0-9]{1,5}$\') { $grace = [int]$env:BADTIME_RESUME_MS }',
   'while (-not $p.HasExited) {',
   '  Start-Sleep -Milliseconds 150',
   '  $now = Read-Control',
@@ -181,9 +185,12 @@ const WINDOWS_LAUNCHER = [
   '  try {',
   '    if ($ready -and $script:h -ne [IntPtr]::Zero) {',
   '      $isFront = [BadTime.Win]::GetForegroundWindow() -eq $script:h',
-  '      if ($isFront -and -not $wasFront) { $hold = $false }',
+  // Coming back to the game ends a hold; the fight resumes after the grace,
+  // so there is a moment to get your hands back on the keys.
+  '      if ($isFront -and -not $wasFront) { $hold = $false; $resumeAt = (Get-Date).AddMilliseconds($grace) }',
   '      $wasFront = $isFront',
-  '      if ($hold -or -not $isFront) { Freeze-Game } else { Thaw-Game }',
+  '      $waiting = $resumeAt -ne $null -and (Get-Date) -lt $resumeAt',
+  '      if ($hold -or -not $isFront -or $waiting) { Freeze-Game } else { $resumeAt = $null; Thaw-Game }',
   '    }',
   "  } catch { [Console]::Error.WriteLine('bad-time-freeze ' + $_) }",
   '}',
@@ -653,7 +660,7 @@ function windowsLaunch(
   return {
     argv: powershellArgv(sys.powershell, WINDOWS_LAUNCHER),
     cwd: sys.home,
-    env: { BADTIME_EXE: exe, BADTIME_ARGS: line, BADTIME_CONTROL: control },
+    env: { BADTIME_EXE: exe, BADTIME_ARGS: line, BADTIME_CONTROL: control, BADTIME_RESUME_MS: String(cfg.resumeMs) },
   }
 }
 
@@ -986,7 +993,7 @@ async function readScreen($: Api, sys: Sys): Promise<{ w: number; h: number } | 
 
 async function needsYou($: Api): Promise<void> {
   try {
-    $.ui.toast('Claude needs you: the fight is frozen. Answer in the terminal, then click the game to carry on.', { timeoutMs: 8_000 })
+    $.ui.toast(`Claude needs you: the fight is frozen. Answer in the terminal, then click the game; it resumes ${seconds(cfg.resumeMs)} later.`, { timeoutMs: 8_000 })
   } catch {
     // no surface to draw on
   }
@@ -1017,6 +1024,7 @@ async function holdGame($: Api): Promise<void> {
     await $.process.run([sys.kill, '-STOP', ...renderers.map(String)], { cwd: sys.home })
     w.held = renderers
     let left = false
+    let backSince: number | undefined
     w.holdWatch = $.clock.every(500, () => {
       void (async () => {
         if (w.held === undefined || w.ended || w.closing) {
@@ -1025,8 +1033,16 @@ async function holdGame($: Api): Promise<void> {
         }
         const front = await frontPid($, sys)
         if (front === undefined) return
-        if (front !== main) left = true
-        else if (left) await releaseHold($, w)
+        if (front !== main) {
+          left = true
+          backSince = undefined
+          return
+        }
+        if (!left) return
+        // Back in the game: resume after the grace, if you stay.
+        const now = await $.clock.now()
+        backSince ??= now
+        if (now - backSince >= cfg.resumeMs) await releaseHold($, w)
       })()
     })
   } catch (err) {
@@ -1130,6 +1146,7 @@ function readConfig(o: PluginOptions, out: string[]): Config {
     delayMs: Math.round(num('delaySeconds', 2, 0, 30) * 1000),
     mode: readMode(str('onFinish', 'pause')),
     countdownMs: Math.round(num('countdownSeconds', 3, 0, 10) * 1000),
+    resumeMs: Math.round(num('resumeDelaySeconds', 2.5, 0, 10) * 1000),
     sounds: bool('sounds', true),
     strayKeyGuard: bool('strayKeyGuard', true),
     windowSize,

@@ -8,8 +8,8 @@ A Claude Code mod that opens **Bad Time Simulator** in its own window while Clau
 
 - Once Claude has been working for 2 seconds, a centered game window opens: about 60% of your screen height, in the game's 4:3 shape, and resizable.
 - **When Claude answers**, you hear a short chime and 3 seconds later the window goes to the background. The game pauses there, and your next prompt brings the same fight back. Quitting the session closes it.
-- **When Claude needs you** (a permission prompt or a question), you hear the same chime and the fight freezes where it stands. Your keyboard focus doesn't move, so game keys can't answer Claude's prompt by accident. Answer in the terminal, then click the game to carry on. The mod never answers or changes anything for Claude.
-- **On Windows the fight runs only while the game window is in front**: click away and it freezes, click back and it continues.
+- **When Claude needs you** (a permission prompt or a question), you hear the same chime and the fight freezes where it stands. Your keyboard focus doesn't move, so game keys can't answer Claude's prompt by accident. Answer in the terminal, then click the game; it carries on 2.5 seconds later. The mod never answers or changes anything for Claude.
+- **On Windows the fight runs only while the game window is in front**: click away and it freezes, click back and it continues 2.5 seconds later.
 - Close the window yourself any time; your next prompt starts a new fight.
 - Up to 4 Claude sessions can each have their own window.
 
@@ -47,6 +47,7 @@ Change these in `/config` or with `/plugin configure bad-time@bad-time`.
 | `onFinish` | `pause` | `pause` sends the window to the background and continues the fight on your next prompt (closes instead on Linux); `close` starts a fresh fight every prompt; `keep` leaves it on screen |
 | `delaySeconds` | 2 | 0 to 30; shorter turns never open the window |
 | `countdownSeconds` | 3 | 0 to 10; seconds between the chime and the window pausing or closing |
+| `resumeDelaySeconds` | 2.5 | 0 to 10; how long the fight stays frozen after you click back into the game |
 | `sounds` | on | The short chime when Claude needs you or finishes |
 | `strayKeyGuard` | on | Holds a prompt sent within 1.5 s of the mod closing the window and puts it back in the box |
 | `windowSize` | `auto` | Or `WIDTHxHEIGHT`, such as `900x700`, 320 to 3840 each |

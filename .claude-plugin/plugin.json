@@ -1,6 +1,6 @@
 {
   "name": "bad-time",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Opens Bad Time Simulator (by Jcw87) in its own window while Claude works. Not affiliated with Undertale or Toby Fox.",
   "author": {
     "name": "Fatih Baştan",
@@ -39,6 +39,14 @@
       "title": "Countdown before closing",
       "description": "Seconds between the chime and the window pausing or closing after Claude answers.",
       "default": 3,
+      "min": 0,
+      "max": 10
+    },
+    "resumeDelaySeconds": {
+      "type": "number",
+      "title": "Grace before the fight resumes",
+      "description": "Seconds the fight stays frozen after you click back into the game, so you can get ready.",
+      "default": 2.5,
       "min": 0,
       "max": 10
     },
