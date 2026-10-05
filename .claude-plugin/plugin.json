@@ -1,6 +1,6 @@
 {
   "name": "bad-time",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Opens Bad Time Simulator (by Jcw87) in its own window while Claude works. Not affiliated with Undertale or Toby Fox.",
   "author": {
     "name": "Fatih Baştan",

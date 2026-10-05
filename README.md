@@ -8,7 +8,8 @@ A Claude Code mod that opens **Bad Time Simulator** in its own window while Clau
 
 - Once Claude has been working for 2 seconds, a centered game window opens: about 60% of your screen height, in the game's 4:3 shape, and resizable.
 - **When Claude answers**, you hear a short chime and 3 seconds later the window goes to the background. The game pauses there, and your next prompt brings the same fight back. Quitting the session closes it.
-- **When Claude needs you** (a permission prompt or a question), you hear the same chime and the window stays open. Switch to the terminal, answer, and switch back. The mod never answers or changes anything for Claude.
+- **When Claude needs you** (a permission prompt or a question), you hear the same chime and the fight freezes where it stands. Your keyboard focus doesn't move, so game keys can't answer Claude's prompt by accident. Answer in the terminal, then click the game to carry on. The mod never answers or changes anything for Claude.
+- **On Windows the fight runs only while the game window is in front**: click away and it freezes, click back and it continues.
 - Close the window yourself any time; your next prompt starts a new fight.
 - Up to 4 Claude sessions can each have their own window.
 

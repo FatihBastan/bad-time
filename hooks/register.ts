@@ -64,6 +64,10 @@ type Win = {
   // Windows: the file the launcher watches for `show <n>` / `hide <n>`.
   control?: string
   seq: number
+  // macOS: renderer pids frozen while Claude needs you, and the watch that
+  // thaws them once you come back to the game.
+  held?: number[]
+  holdWatch?: Timer
   heartbeat?: Timer
 }
 
@@ -104,6 +108,10 @@ const WINDOWS_LAUNCHER = [
   '    [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr window);',
   '    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);',
   '    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr window);',
+  '    [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(uint access, bool inherit, int id);',
+  '    [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);',
+  '    [DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr handle);',
+  '    [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr handle);',
   "  '",
   '  $ready = $true',
   "} catch { [Console]::Error.WriteLine('bad-time-win32 ' + $_) }",
@@ -134,16 +142,50 @@ const WINDOWS_LAUNCHER = [
   '  $w = Find-Game',
   '  if ($w -ne [IntPtr]::Zero) { [void][BadTime.Win]::ShowWindow($w, 6) }',
   '}',
+  // The fight runs only while its window is in front and Claude does not
+  // need you; otherwise the page's renderer processes are suspended, which
+  // freezes the game where it stands without moving the keyboard focus.
+  '$script:frozen = $false',
+  '$script:frozenIds = @()',
+  "function Get-Renderers { @(Get-CimInstance Win32_Process -Filter ('ParentProcessId = ' + $p.Id) | Where-Object { $_.CommandLine -like '*--type=renderer*' } | ForEach-Object { [int]$_.ProcessId }) }",
+  'function Set-RendererState($id, $suspend) {',
+  '  $hp = [BadTime.Win]::OpenProcess(0x0800, $false, $id)',
+  '  if ($hp -eq [IntPtr]::Zero) { return }',
+  '  if ($suspend) { [void][BadTime.Win]::NtSuspendProcess($hp) } else { [void][BadTime.Win]::NtResumeProcess($hp) }',
+  '  [void][BadTime.Win]::CloseHandle($hp)',
+  '}',
+  'function Freeze-Game {',
+  '  if (-not $ready -or $script:frozen) { return }',
+  '  $script:frozenIds = Get-Renderers',
+  '  foreach ($id in $script:frozenIds) { Set-RendererState $id $true }',
+  '  $script:frozen = $true',
+  '}',
+  'function Thaw-Game {',
+  '  if (-not $script:frozen) { return }',
+  '  foreach ($id in $script:frozenIds) { Set-RendererState $id $false }',
+  '  $script:frozenIds = @()',
+  '  $script:frozen = $false',
+  '}',
   "try { Show-Game } catch { [Console]::Error.WriteLine('bad-time-front ' + $_) }",
+  '$hold = $false',
+  '$wasFront = $true',
   'while (-not $p.HasExited) {',
   '  Start-Sleep -Milliseconds 150',
   '  $now = Read-Control',
   '  if ($now -ne $null -and $now -ne $last) {',
   '    $last = $now',
-  "    try { if ($now.StartsWith('show')) { Show-Game } elseif ($now.StartsWith('hide')) { Hide-Game } } catch { [Console]::Error.WriteLine('bad-time-control ' + $_) }",
+  "    try { if ($now.StartsWith('show')) { Show-Game } elseif ($now.StartsWith('hide')) { Hide-Game } elseif ($now.StartsWith('hold')) { $hold = $true } } catch { [Console]::Error.WriteLine('bad-time-control ' + $_) }",
   "    [Console]::Out.WriteLine('bad-time-did ' + $now)",
   '    [Console]::Out.Flush()',
   '  }',
+  '  try {',
+  '    if ($ready -and $script:h -ne [IntPtr]::Zero) {',
+  '      $isFront = [BadTime.Win]::GetForegroundWindow() -eq $script:h',
+  '      if ($isFront -and -not $wasFront) { $hold = $false }',
+  '      $wasFront = $isFront',
+  '      if ($hold -or -not $isFront) { Freeze-Game } else { Thaw-Game }',
+  '    }',
+  "  } catch { [Console]::Error.WriteLine('bad-time-freeze ' + $_) }",
   '}',
 ].join('\n')
 
@@ -418,6 +460,7 @@ async function pauseWindow($: Api): Promise<void> {
   }
   w.hidden = true
   closedAt = await $.clock.now()
+  if (w.held !== undefined) await releaseHold($, w)
   if (!(await setShown($, sys, w, false))) await closeWindow($, true)
 }
 
@@ -505,6 +548,7 @@ async function startWindow($: Api): Promise<void> {
     '--hide-crash-restore-bubble',
     '--disable-extensions',
     '--disable-sync',
+    '--disable-hang-monitor',
   ]
   const control = sys.os === 'windows' ? [sys.home, '.bad-time', 'control', `slot-${slot}.txt`].join(sys.sep) : undefined
   if (control !== undefined) await $.fs.write(control, 'show 0')
@@ -753,6 +797,22 @@ async function mainPid($: Api, sys: Sys, slot: number): Promise<number | undefin
   return undefined
 }
 
+// The page's renderer processes for a slot: ours, and --type=renderer.
+async function rendererPids($: Api, sys: Sys, slot: number): Promise<number[]> {
+  if (sys.ps === undefined) return []
+  const pattern = ownerPattern(slot)
+  const run = await $.process.run([sys.ps, '-A', '-ww', '-o', 'pid=', '-o', 'command='], { cwd: sys.home })
+  const pids: number[] = []
+  for (const line of run.stdout.split(/\r?\n/)) {
+    const m = /^\s*(\d{1,10})\s+(.*)$/.exec(line)
+    const command = m?.[2] ?? ''
+    if (m === null || !pattern.test(command) || !command.includes('--type=renderer')) continue
+    const pid = Number(m[1])
+    if (Number.isSafeInteger(pid) && pid > 1) pids.push(pid)
+  }
+  return pids
+}
+
 async function killSlot($: Api, sys: Sys, slot: number): Promise<void> {
   try {
     const pids = await ownedPids($, sys, slot)
@@ -926,11 +986,74 @@ async function readScreen($: Api, sys: Sys): Promise<{ w: number; h: number } | 
 
 async function needsYou($: Api): Promise<void> {
   try {
-    $.ui.toast('Claude needs you in the terminal. Answer there, then switch back to the game.', { timeoutMs: 8_000 })
+    $.ui.toast('Claude needs you: the fight is frozen. Answer in the terminal, then click the game to carry on.', { timeoutMs: 8_000 })
   } catch {
     // no surface to draw on
   }
+  void holdGame($)
   await chime($)
+}
+
+// Freeze the fight where it stands while Claude needs you. The keyboard focus
+// stays where it is, so game keys can't land on Claude's prompt; the fight
+// carries on once you leave the game and come back to it.
+async function holdGame($: Api): Promise<void> {
+  try {
+    const w = win
+    if (w === undefined || w.closing || w.hidden || w.held !== undefined) return
+    const sys = await system($)
+    if (sys === undefined) return
+    if (sys.os === 'windows') {
+      if (w.control === undefined) return
+      w.seq += 1
+      await $.fs.write(w.control, `hold ${w.seq}`)
+      return
+    }
+    if (sys.os !== 'mac' || sys.kill === undefined || sys.osascript === undefined) return
+    const main = w.pid ?? (await mainPid($, sys, w.slot))
+    const renderers = await rendererPids($, sys, w.slot)
+    if (main === undefined || renderers.length === 0) return
+    w.pid = main
+    await $.process.run([sys.kill, '-STOP', ...renderers.map(String)], { cwd: sys.home })
+    w.held = renderers
+    let left = false
+    w.holdWatch = $.clock.every(500, () => {
+      void (async () => {
+        if (w.held === undefined || w.ended || w.closing) {
+          w.holdWatch?.cancel()
+          return
+        }
+        const front = await frontPid($, sys)
+        if (front === undefined) return
+        if (front !== main) left = true
+        else if (left) await releaseHold($, w)
+      })()
+    })
+  } catch (err) {
+    debug($, `hold: ${describe(err)}`)
+  }
+}
+
+async function releaseHold($: Api, w: Win): Promise<void> {
+  const held = w.held
+  w.held = undefined
+  w.holdWatch?.cancel()
+  w.holdWatch = undefined
+  if (held === undefined) return
+  try {
+    const sys = await system($)
+    if (sys?.kill !== undefined) await $.process.run([sys.kill, '-CONT', ...held.map(String)], { cwd: sys.home })
+  } catch (err) {
+    debug($, `release: ${describe(err)}`)
+  }
+}
+
+async function frontPid($: Api, sys: Sys): Promise<number | undefined> {
+  if (sys.osascript === undefined) return undefined
+  const script = "ObjC.import('AppKit'); $.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier"
+  const run = await $.process.run([sys.osascript, '-l', 'JavaScript', '-e', script], { cwd: sys.home, timeoutMs: 5_000 })
+  const pid = Number(run.stdout.trim())
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined
 }
 
 async function chime($: Api): Promise<void> {

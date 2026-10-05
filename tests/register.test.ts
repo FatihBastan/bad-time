@@ -14,6 +14,8 @@ type World = {
   spawns: { argv: readonly string[]; cwd?: string; env?: Readonly<Record<string, string>> }[]
   runs: { argv: readonly string[]; cwd?: string; script?: string; killed?: readonly string[] }[]
   files: Map<string, string>
+  // macOS: the pid of the frontmost app, as NSWorkspace reports it.
+  front: number
   toasts: string[]
   chimes: number
   fills: string[]
@@ -51,6 +53,7 @@ function makeWorld(on: On, os: Os = 'mac', setup: Setup = {}): World {
     spawns: [],
     runs: [],
     files: new Map(),
+    front: 1,
     toasts: [],
     chimes: 0,
     fills: [],
@@ -132,7 +135,14 @@ function makeWorld(on: On, os: Os = 'mac', setup: Setup = {}): World {
     world.runs.push({ argv: e.argv, cwd: e.init?.cwd, script: bin.endsWith('powershell.exe') ? last : undefined })
     const ok = (stdout = '') => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     if (bin === '/bin/ps' || (bin.endsWith('powershell.exe') && last.includes('Win32_Process'))) {
-      const rows = world.live().map(c => `${c.pid} ${c.argv.map(a => (a.includes(' ') ? `"${a}"` : a)).join(' ')}`)
+      const quote = (a: string) => (a.includes(' ') ? `"${a}"` : a)
+      const rows = world.live().flatMap(c => {
+        const own = `${c.pid} ${c.argv.map(quote).join(' ')}`
+        const profile = c.argv.find(a => a.startsWith('--user-data-dir='))
+        // Each browser has one page renderer, a helper with --type=renderer.
+        const renderer = profile === undefined ? [] : [`${c.pid + 10_000} ${quote(c.argv[0] ?? '')} --type=renderer ${quote(profile)}`]
+        return [own, ...renderer]
+      })
       return ok([...rows, ...world.foreign].join('\n'))
     }
     if (bin === '/bin/kill' || bin.endsWith('taskkill.exe')) {
@@ -140,6 +150,7 @@ function makeWorld(on: On, os: Os = 'mac', setup: Setup = {}): World {
       for (const c of world.children) if (pids.includes(c.pid)) c.exit()
       return ok()
     }
+    if (bin === '/usr/bin/osascript' && e.argv.some(a => a.includes('frontmostApplication'))) return ok(`${world.front}\n`)
     if (bin === '/usr/bin/osascript') return ok('1512x982\n')
     if (bin.endsWith('powershell.exe') && last.includes('PrimaryScreen')) return ok('1920x1040\r\n')
     if (bin.endsWith('powershell.exe') || bin === '/usr/bin/paplay') world.chimes += 1
@@ -379,6 +390,38 @@ describe('hands off Claude', () => {
     await w.clock.advance(100)
     expect(w.chimes).toBe(1)
     expect(child.alive).toBe(true)
+  })
+
+  test('macOS: when Claude needs you the fight freezes, and thaws only after you leave the game and come back', async ($, on) => {
+    const w = makeWorld(on)
+    const game = await openGame($, w)
+    w.front = game.pid
+    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' } })
+    await w.clock.advance(100)
+    const signals = () => w.runs.filter(r => r.argv[0] === '/bin/kill').map(r => r.argv.slice(1).join(' '))
+    expect(signals()).toEqual([`-STOP ${game.pid + 10_000}`])
+    await w.clock.advance(2_000)
+    expect(signals()).toEqual([`-STOP ${game.pid + 10_000}`])
+    w.front = 999
+    await w.clock.advance(1_000)
+    expect(signals().length).toBe(1)
+    w.front = game.pid
+    await w.clock.advance(1_000)
+    expect(signals()).toEqual([`-STOP ${game.pid + 10_000}`, `-CONT ${game.pid + 10_000}`])
+    expect(game.alive).toBe(true)
+  })
+
+  test('Windows: when Claude needs you the launcher is told to hold the fight', async ($, on) => {
+    const w = makeWorld(on, 'windows')
+    const game = await openGame($, w)
+    expect(game.argv).toContain('--disable-hang-monitor')
+    const script = decodeScript(w.spawns[0]?.argv ?? []) ?? ''
+    expect(script).toContain('NtSuspendProcess')
+    expect(script).toContain('if ($hold -or -not $isFront) { Freeze-Game } else { Thaw-Game }')
+    await $.tool.call({ tool: 'AskUserQuestion', questions: [] } as never)
+    await w.clock.advance(100)
+    expect([...w.files.values()].at(-1)).toBe('hold 1')
+    expect(game.alive).toBe(true)
   })
 
   test('no alert while no game is open', async ($, on) => {
