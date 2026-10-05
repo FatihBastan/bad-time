@@ -1,6 +1,6 @@
 {
   "name": "bad-time",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Opens Bad Time Simulator (by Jcw87) in its own window while Claude works. Not affiliated with Undertale or Toby Fox.",
   "author": {
     "name": "Fatih Baştan",
@@ -18,12 +18,13 @@
     "onFinish": {
       "type": "string",
       "title": "When Claude finishes",
-      "description": "close: the window closes a few seconds after Claude answers and opens fresh on your next prompt. keep: it stays open between prompts.",
+      "description": "pause: the window goes to the background after Claude answers and the fight continues on your next prompt. close: a fresh fight every prompt. keep: always on screen.",
       "options": [
-        "keep",
-        "close"
+        "pause",
+        "close",
+        "keep"
       ],
-      "default": "close"
+      "default": "pause"
     },
     "delaySeconds": {
       "type": "number",
@@ -36,7 +37,7 @@
     "countdownSeconds": {
       "type": "number",
       "title": "Countdown before closing",
-      "description": "Seconds between the chime and the window closing after Claude answers (onFinish = close).",
+      "description": "Seconds between the chime and the window pausing or closing after Claude answers.",
       "default": 3,
       "min": 0,
       "max": 10

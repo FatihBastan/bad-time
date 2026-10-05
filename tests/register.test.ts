@@ -13,6 +13,7 @@ type World = {
   children: Child[]
   spawns: { argv: readonly string[]; cwd?: string; env?: Readonly<Record<string, string>> }[]
   runs: { argv: readonly string[]; cwd?: string; script?: string; killed?: readonly string[] }[]
+  files: Map<string, string>
   toasts: string[]
   chimes: number
   fills: string[]
@@ -49,6 +50,7 @@ function makeWorld(on: On, os: Os = 'mac', setup: Setup = {}): World {
     children: [],
     spawns: [],
     runs: [],
+    files: new Map(),
     toasts: [],
     chimes: 0,
     fills: [],
@@ -67,6 +69,10 @@ function makeWorld(on: On, os: Os = 'mac', setup: Setup = {}): World {
   on('command.register', async (_$, e) => {
     if (setup.failRegister === true) throw new Error('boom')
     return { value: { command: e.name } }
+  })
+  on('fs.write', async (_$, e) => {
+    world.files.set(e.path.slice(e.path.lastIndexOf('/') + 1), e.text)
+    return { value: undefined }
   })
   on('ui.toast', async (_$, e) => {
     world.toasts.push(e.text)
@@ -234,7 +240,22 @@ describe('opening', () => {
     expect(w.children.length).toBe(1)
   })
 
-  test('by default the window closes a few seconds after Claude answers, and the next prompt opens a fresh one', async ($, on) => {
+  test('pause (default): after Claude answers the window goes to the background, and the next prompt brings the same fight back', async ($, on) => {
+    const w = makeWorld(on)
+    const game = await openGame($, w)
+    await $.turn.complete(done('t1'))
+    await w.clock.advance(5_000)
+    const macCalls = () => w.runs.filter(r => r.argv[0] === '/usr/bin/osascript' && r.argv.includes('JavaScript') && r.argv.length === 7)
+    expect(macCalls().map(r => r.argv.slice(5))).toEqual([['hide', String(game.pid)]])
+    expect(game.alive).toBe(true)
+    await $.turn.start({ text: 'next', turnId: 't2' })
+    await w.clock.advance(3_000)
+    expect(macCalls().map(r => r.argv[5])).toEqual(['hide', 'show'])
+    expect(w.children.length).toBe(1)
+    expect(game.alive).toBe(true)
+  })
+
+  test('close: after Claude answers the window closes, and the next prompt opens a fresh one', { options: { onFinish: 'close' } }, async ($, on) => {
     const w = makeWorld(on)
     const first = await openGame($, w)
     await $.turn.complete(done('t1'))
@@ -515,6 +536,16 @@ describe('commands and config', () => {
   })
 })
 
+describe('linux', () => {
+  test('pause falls back to closing where a window cannot be hidden', async ($, on) => {
+    const w = makeWorld(on, 'linux')
+    const game = await openGame($, w)
+    await $.turn.complete(done('t1'))
+    await w.clock.advance(6_000)
+    expect(game.alive).toBe(false)
+  })
+})
+
 describe('windows', () => {
   test('starts the browser through a PowerShell launcher with a centered window, never by itself', async ($, on) => {
     const w = makeWorld(on, 'windows')
@@ -534,7 +565,25 @@ describe('windows', () => {
     for (const r of w.runs) expect(/^[A-Z]:\\/.test(r.argv[0] ?? '')).toBe(true)
   })
 
-  test('after Claude answers, the browser is asked to close by its own pid, gently', async ($, on) => {
+  test('pause (default): the launcher is told to minimize, and to restore on the next prompt', async ($, on) => {
+    const w = makeWorld(on, 'windows')
+    const game = await openGame($, w)
+    expect(w.spawns[0]?.env?.BADTIME_CONTROL).toBe('C:\\Users\\Fatih Baştan\\.bad-time\\control\\slot-1.txt')
+    expect(decodeScript(w.spawns[0]?.argv ?? [])).toContain('ShowWindow($w, 6)')
+    await $.turn.complete(done('t1'))
+    await w.clock.advance(5_000)
+    const control = () => [...w.files.values()].at(-1)
+    expect(control()).toBe('hide 1')
+    expect(game.alive).toBe(true)
+    await $.turn.start({ text: 'next', turnId: 't2' })
+    await w.clock.advance(3_000)
+    expect(control()).toBe('show 2')
+    expect(w.children.length).toBe(1)
+    const status = await $.command.run(badtime('status'))
+    expect(status.text).toContain('open (slot 1 of 4)')
+  })
+
+  test('close mode: after Claude answers, the browser is asked to close by its own pid, gently', { options: { onFinish: 'close' } }, async ($, on) => {
     const w = makeWorld(on, 'windows')
     const child = await openGame($, w)
     await $.turn.complete(done('t1'))

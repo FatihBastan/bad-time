@@ -24,7 +24,7 @@ import type {
 
 type Api = EngineInterface
 type Os = 'mac' | 'windows' | 'linux'
-type Mode = 'keep' | 'close'
+type Mode = 'pause' | 'close' | 'keep'
 
 type Config = {
   url: string
@@ -58,6 +58,12 @@ type Win = {
   startedAt: number
   closing: boolean
   ended: boolean
+  // Paused: minimized (Windows) or hidden (macOS) between prompts. A hidden
+  // page stops drawing, so the game waits exactly where you left it.
+  hidden: boolean
+  // Windows: the file the launcher watches for `show <n>` / `hide <n>`.
+  control?: string
+  seq: number
   heartbeat?: Timer
 }
 
@@ -76,14 +82,18 @@ const USAGE = 'Usage: /badtime [on | off | now | close | status]'
 
 // Windows: start the browser the way a person's own shell does (Start-Process,
 // so it gets a normal window and none of Claude Code's pipes), print its pid,
-// bring its window to the front, then wait for it to exit. Started directly
-// by Claude Code, Chrome on Windows drew an empty window. Inputs arrive in
-// environment variables, so nothing is ever spliced into the script.
+// bring its window to the front, then watch a control file for `show` and
+// `hide` until the browser exits. Started directly by Claude Code, Chrome on
+// Windows drew an empty window. Inputs arrive in environment variables, so
+// nothing is ever spliced into the script.
 const WINDOWS_LAUNCHER = [
   "$ErrorActionPreference = 'Stop'",
+  'function Read-Control { try { return [IO.File]::ReadAllText($env:BADTIME_CONTROL).Trim() } catch { return $null } }',
+  '$last = Read-Control',
   '$p = Start-Process -FilePath $env:BADTIME_EXE -ArgumentList $env:BADTIME_ARGS -PassThru',
   "[Console]::Out.WriteLine('bad-time-pid ' + $p.Id)",
   '[Console]::Out.Flush()',
+  '$ready = $false',
   'try {',
   "  Add-Type -Namespace BadTime -Name Win -MemberDefinition '",
   '    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
@@ -93,20 +103,62 @@ const WINDOWS_LAUNCHER = [
   '    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr window, int command);',
   '    [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr window);',
   '    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);',
+  '    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr window);',
   "  '",
-  '  for ($i = 0; $i -lt 50 -and -not $p.HasExited -and $p.MainWindowHandle -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 200; $p.Refresh() }',
-  '  $h = $p.MainWindowHandle',
-  '  if ($h -ne [IntPtr]::Zero) {',
-  '    $front = [BadTime.Win]::GetWindowThreadProcessId([BadTime.Win]::GetForegroundWindow(), [IntPtr]::Zero)',
-  '    $me = [BadTime.Win]::GetCurrentThreadId()',
-  '    [void][BadTime.Win]::AttachThreadInput($me, $front, $true)',
-  '    [void][BadTime.Win]::ShowWindow($h, 9)',
-  '    [void][BadTime.Win]::BringWindowToTop($h)',
-  '    [void][BadTime.Win]::SetForegroundWindow($h)',
-  '    [void][BadTime.Win]::AttachThreadInput($me, $front, $false)',
+  '  $ready = $true',
+  "} catch { [Console]::Error.WriteLine('bad-time-win32 ' + $_) }",
+  '$script:h = [IntPtr]::Zero',
+  'function Find-Game {',
+  '  if ($script:h -ne [IntPtr]::Zero -and [BadTime.Win]::IsWindow($script:h)) { return $script:h }',
+  '  for ($i = 0; $i -lt 50 -and -not $p.HasExited; $i++) {',
+  '    $p.Refresh()',
+  '    if ($p.MainWindowHandle -ne [IntPtr]::Zero) { $script:h = $p.MainWindowHandle; return $script:h }',
+  '    Start-Sleep -Milliseconds 200',
   '  }',
-  "} catch { [Console]::Error.WriteLine('bad-time-front ' + $_) }",
-  '$p.WaitForExit()',
+  '  return [IntPtr]::Zero',
+  '}',
+  'function Show-Game {',
+  '  if (-not $ready) { return }',
+  '  $w = Find-Game',
+  '  if ($w -eq [IntPtr]::Zero) { return }',
+  '  $front = [BadTime.Win]::GetWindowThreadProcessId([BadTime.Win]::GetForegroundWindow(), [IntPtr]::Zero)',
+  '  $me = [BadTime.Win]::GetCurrentThreadId()',
+  '  [void][BadTime.Win]::AttachThreadInput($me, $front, $true)',
+  '  [void][BadTime.Win]::ShowWindow($w, 9)',
+  '  [void][BadTime.Win]::BringWindowToTop($w)',
+  '  [void][BadTime.Win]::SetForegroundWindow($w)',
+  '  [void][BadTime.Win]::AttachThreadInput($me, $front, $false)',
+  '}',
+  'function Hide-Game {',
+  '  if (-not $ready) { return }',
+  '  $w = Find-Game',
+  '  if ($w -ne [IntPtr]::Zero) { [void][BadTime.Win]::ShowWindow($w, 6) }',
+  '}',
+  "try { Show-Game } catch { [Console]::Error.WriteLine('bad-time-front ' + $_) }",
+  'while (-not $p.HasExited) {',
+  '  Start-Sleep -Milliseconds 150',
+  '  $now = Read-Control',
+  '  if ($now -ne $null -and $now -ne $last) {',
+  '    $last = $now',
+  "    try { if ($now.StartsWith('show')) { Show-Game } elseif ($now.StartsWith('hide')) { Hide-Game } } catch { [Console]::Error.WriteLine('bad-time-control ' + $_) }",
+  "    [Console]::Out.WriteLine('bad-time-did ' + $now)",
+  '    [Console]::Out.Flush()',
+  '  }',
+  '}',
+].join('\n')
+
+// macOS: hide or bring back the browser's own app by its pid. NSRunningApplication
+// needs no Accessibility permission. argv: [show|hide, pid].
+const MAC_WINDOW = [
+  'function run(argv) {',
+  "  ObjC.import('AppKit')",
+  '  var app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(Number(argv[1]))',
+  "  if (app.isNil()) return 'missing'",
+  "  if (argv[0] === 'hide') { app.hide; return 'hidden' }",
+  '  app.unhide',
+  '  app.activateWithOptions(3)',
+  "  return 'shown'",
+  '}',
 ].join('\n')
 
 // One id per loaded module: slots are owned by it, so a /clear (new session
@@ -167,7 +219,8 @@ export const register: Register = (on, options) => {
       countdown = undefined
       openTimer?.cancel()
       openTimer = undefined
-      if (enabled && !(win !== undefined && !win.closing)) {
+      const live = win !== undefined && !win.closing
+      if (enabled && (!live || win?.hidden === true)) {
         const gen = turnGen
         openTimer = $.clock.after(Math.max(1, cfg.delayMs), () => {
           openTimer = undefined
@@ -186,14 +239,15 @@ export const register: Register = (on, options) => {
         activeTurn = undefined
         openTimer?.cancel()
         openTimer = undefined
-        const isOpen = win !== undefined && !win.closing
-        if (isOpen && !e.isAborted) void chime($)
-        if (cfg.mode === 'close' && (isOpen || launching !== undefined)) {
+        const isShown = win !== undefined && !win.closing && !win.hidden
+        if (isShown && !e.isAborted) void chime($)
+        if (cfg.mode !== 'keep' && (isShown || launching !== undefined)) {
           const gen = turnGen
           countdown?.cancel()
           countdown = $.clock.after(Math.max(1, cfg.countdownMs), () => {
             countdown = undefined
-            if (gen === turnGen && activeTurn === undefined) void closeWindow($, true)
+            if (gen !== turnGen || activeTurn !== undefined) return
+            void (cfg.mode === 'pause' ? pauseWindow($) : closeWindow($, true))
           })
         }
       }
@@ -207,7 +261,7 @@ export const register: Register = (on, options) => {
   // untouched; you switch to the terminal yourself, then back to the game.
   on('classic.PermissionRequest', async ($, e, next) => {
     try {
-      if (win !== undefined && !win.closing) void needsYou($)
+      if (win !== undefined && !win.closing && !win.hidden) void needsYou($)
     } catch (err) {
       debug($, `permission alert: ${describe(err)}`)
     }
@@ -216,7 +270,7 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
     try {
-      if (win !== undefined && !win.closing) void needsYou($)
+      if (win !== undefined && !win.closing && !win.hidden) void needsYou($)
     } catch (err) {
       debug($, `question alert: ${describe(err)}`)
     }
@@ -295,6 +349,10 @@ async function runCommand($: Api, args: string): Promise<string> {
       return 'bad-time is off. Run /badtime on to turn it back on.'
     }
     case 'now': {
+      if (win !== undefined && !win.closing && win.hidden) {
+        void resumeWindow($)
+        return 'Bringing the game back.'
+      }
       if (win !== undefined && !win.closing) return 'The game window is already open.'
       void launch($, true)
       return 'Opening Bad Time Simulator.'
@@ -317,8 +375,14 @@ async function statusText($: Api): Promise<string> {
   const sys = await system($)
   const browser = sys === undefined ? undefined : await findBrowser($, sys, false)
   const state = enabled ? 'on' : 'off'
-  const mode = cfg.mode === 'keep' ? 'stays open between prompts' : `closes ${seconds(cfg.countdownMs)} after Claude finishes`
-  const window = win !== undefined && !win.closing ? `open (slot ${win.slot} of ${SLOT_COUNT})` : 'closed'
+  const mode =
+    cfg.mode === 'pause'
+      ? `pauses ${seconds(cfg.countdownMs)} after Claude finishes and comes back on your next prompt`
+      : cfg.mode === 'close'
+        ? `closes ${seconds(cfg.countdownMs)} after Claude finishes`
+        : 'stays open between prompts'
+  const live = win !== undefined && !win.closing ? win : undefined
+  const window = live === undefined ? 'closed' : `${live.hidden ? 'paused in the background' : 'open'} (slot ${live.slot} of ${SLOT_COUNT})`
   return [
     `bad-time is ${state}; the window ${mode}.`,
     `Window: ${window}. Opens after ${seconds(cfg.delayMs)} of work. Chime: ${cfg.sounds ? 'on' : 'off'}.`,
@@ -334,7 +398,66 @@ async function openForTurn($: Api, gen: number): Promise<void> {
   // has to finish first, or the new one would share its profile.
   for (let i = 0; i < 16 && win !== undefined && win.closing; i += 1) await pause($, 250)
   if (gen !== turnGen || activeTurn === undefined || !enabled) return
+  if (win !== undefined && !win.closing && win.hidden) {
+    await resumeWindow($)
+    return
+  }
   await launch($)
+}
+
+// Pause: send the window to the background; the hidden page stops drawing,
+// so the fight waits. Where it can't be hidden (Linux), it closes instead.
+async function pauseWindow($: Api): Promise<void> {
+  if (launching !== undefined) await launching
+  const w = win
+  if (w === undefined || w.closing || w.hidden) return
+  const sys = await system($)
+  if (sys === undefined || sys.os === 'linux') {
+    await closeWindow($, true)
+    return
+  }
+  w.hidden = true
+  closedAt = await $.clock.now()
+  if (!(await setShown($, sys, w, false))) await closeWindow($, true)
+}
+
+async function resumeWindow($: Api): Promise<void> {
+  const w = win
+  if (w === undefined || w.closing || !w.hidden) return
+  const sys = await system($)
+  if (sys === undefined) return
+  w.hidden = false
+  if (!(await setShown($, sys, w, true))) {
+    // Could not bring it back: start over with a fresh window.
+    await closeWindow($, false)
+    for (let i = 0; i < 16 && win !== undefined; i += 1) await pause($, 250)
+    await launch($)
+  }
+}
+
+async function setShown($: Api, sys: Sys, w: Win, shown: boolean): Promise<boolean> {
+  const verb = shown ? 'show' : 'hide'
+  try {
+    if (sys.os === 'windows') {
+      if (w.control === undefined) return false
+      w.seq += 1
+      await $.fs.write(w.control, `${verb} ${w.seq}`)
+      return true
+    }
+    if (sys.os === 'mac' && sys.osascript !== undefined) {
+      const pid = w.pid ?? (await mainPid($, sys, w.slot))
+      if (pid === undefined) return false
+      w.pid = pid
+      const run = await $.process.run([sys.osascript, '-l', 'JavaScript', '-e', MAC_WINDOW, verb, String(pid)], {
+        cwd: sys.home,
+        timeoutMs: 10_000,
+      })
+      return run.exitCode === 0 && !run.stdout.includes('missing')
+    }
+  } catch (err) {
+    debug($, `${verb}: ${describe(err)}`)
+  }
+  return false
 }
 
 function launch($: Api, force = false): Promise<void> {
@@ -383,7 +506,9 @@ async function startWindow($: Api): Promise<void> {
     '--disable-extensions',
     '--disable-sync',
   ]
-  const request = sys.os === 'windows' ? windowsLaunch(sys, argv) : { argv, cwd: sys.home }
+  const control = sys.os === 'windows' ? [sys.home, '.bad-time', 'control', `slot-${slot}.txt`].join(sys.sep) : undefined
+  if (control !== undefined) await $.fs.write(control, 'show 0')
+  const request = sys.os === 'windows' && control !== undefined ? windowsLaunch(sys, argv, control) : { argv, cwd: sys.home }
   if (request === undefined) {
     warnOnce($, 'launcher', 'could not build the Windows launch command; check browserPath in /config')
     await releaseSlot($, slot)
@@ -395,6 +520,9 @@ async function startWindow($: Api): Promise<void> {
     startedAt: await $.clock.now(),
     closing: false,
     ended: false,
+    hidden: false,
+    control,
+    seq: 0,
   }
   win = w
   w.heartbeat = $.clock.every(HEARTBEAT_MS, () => void beat($, slot))
@@ -469,7 +597,11 @@ async function windowsClose($: Api, sys: Sys, pid: number, force: boolean): Prom
 // The command line for Start-Process: one string, each argument quoted when
 // it holds a space. None may hold a quote or a line break, or end in a
 // backslash, so the quoting can't be broken out of.
-function windowsLaunch(sys: Sys, argv: readonly string[]): { argv: string[]; cwd: string; env: Record<string, string> } | undefined {
+function windowsLaunch(
+  sys: Sys,
+  argv: readonly string[],
+  control: string,
+): { argv: string[]; cwd: string; env: Record<string, string> } | undefined {
   const [exe, ...args] = argv
   if (sys.powershell === undefined || exe === undefined) return undefined
   if ([exe, ...args].some(a => /["\r\n]/.test(a) || a.endsWith('\\'))) return undefined
@@ -477,7 +609,7 @@ function windowsLaunch(sys: Sys, argv: readonly string[]): { argv: string[]; cwd
   return {
     argv: powershellArgv(sys.powershell, WINDOWS_LAUNCHER),
     cwd: sys.home,
-    env: { BADTIME_EXE: exe, BADTIME_ARGS: line },
+    env: { BADTIME_EXE: exe, BADTIME_ARGS: line, BADTIME_CONTROL: control },
   }
 }
 
@@ -604,6 +736,21 @@ async function ownedPids($: Api, sys: Sys, slot: number): Promise<number[]> {
     if (pattern.test(m[2] ?? '')) pids.push(pid)
   }
   return pids
+}
+
+// The browser's main process for a slot: ours, and not a helper (--type=).
+async function mainPid($: Api, sys: Sys, slot: number): Promise<number | undefined> {
+  if (sys.ps === undefined) return undefined
+  const pattern = ownerPattern(slot)
+  const run = await $.process.run([sys.ps, '-A', '-ww', '-o', 'pid=', '-o', 'command='], { cwd: sys.home })
+  for (const line of run.stdout.split(/\r?\n/)) {
+    const m = /^\s*(\d{1,10})\s+(.*)$/.exec(line)
+    const command = m?.[2] ?? ''
+    if (m === null || !pattern.test(command) || command.includes('--type=')) continue
+    const pid = Number(m[1])
+    if (Number.isSafeInteger(pid) && pid > 1) return pid
+  }
+  return undefined
 }
 
 async function killSlot($: Api, sys: Sys, slot: number): Promise<void> {
@@ -858,13 +1005,17 @@ function readConfig(o: PluginOptions, out: string[]): Config {
   return {
     url,
     delayMs: Math.round(num('delaySeconds', 2, 0, 30) * 1000),
-    mode: str('onFinish', 'close') === 'keep' ? 'keep' : 'close',
+    mode: readMode(str('onFinish', 'pause')),
     countdownMs: Math.round(num('countdownSeconds', 3, 0, 10) * 1000),
     sounds: bool('sounds', true),
     strayKeyGuard: bool('strayKeyGuard', true),
     windowSize,
     browserPath: str('browserPath', ''),
   }
+}
+
+function readMode(value: string): Mode {
+  return value === 'close' || value === 'keep' ? value : 'pause'
 }
 
 function parseSize(text: string): { w: number; h: number } | undefined {
