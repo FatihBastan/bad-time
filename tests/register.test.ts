@@ -11,7 +11,8 @@ type Child = { pid: number; argv: readonly string[]; cwd?: string; alive: boolea
 
 type World = {
   children: Child[]
-  runs: { argv: readonly string[]; cwd?: string }[]
+  spawns: { argv: readonly string[]; cwd?: string; env?: Readonly<Record<string, string>> }[]
+  runs: { argv: readonly string[]; cwd?: string; script?: string; killed?: readonly string[] }[]
   toasts: string[]
   chimes: number
   fills: string[]
@@ -46,6 +47,7 @@ function makeWorld(on: On, os: Os = 'mac', setup: Setup = {}): World {
 
   const world: World = {
     children: [],
+    spawns: [],
     runs: [],
     toasts: [],
     chimes: 0,
@@ -82,18 +84,35 @@ function makeWorld(on: On, os: Os = 'mac', setup: Setup = {}): World {
     world.fills.push(e.text)
     return { isFilled: true }
   })
-  on('process.spawn', async function* (_$, e, next): AsyncGenerator<ProcessSpawnChunk, { value: ProcessSpawnResult }> {
+  const startBrowser = (argv: readonly string[], cwd?: string): { child: Child; exited: Promise<void> } => {
     let release = () => {}
     const exited = new Promise<void>(resolve => {
       release = resolve
     })
-    const child: Child = { pid: nextPid++, argv: e.argv, cwd: e.cwd, alive: true, exit: () => {} }
+    const child: Child = { pid: nextPid++, argv, cwd, alive: true, exit: () => {} }
     child.exit = () => {
       child.alive = false
       release()
     }
     world.children.push(child)
+    return { child, exited }
+  }
+
+  on('process.spawn', async function* (_$, e, next): AsyncGenerator<ProcessSpawnChunk, { value: ProcessSpawnResult }> {
+    world.spawns.push({ argv: e.argv, cwd: e.cwd, env: e.env })
     const stopped = new Promise<void>(resolve => next.signal.addEventListener('abort', () => resolve()))
+    const script = (e.argv[0] ?? '').endsWith('powershell.exe') ? decodeScript(e.argv) : undefined
+    if (script !== undefined) {
+      // The Windows launcher: Start-Process detaches the browser, so ending
+      // the launcher leaves the browser running, as on a real PC.
+      if (!script.includes('Start-Process')) return { value: { code: 1, signal: null } }
+      const exe = e.env?.BADTIME_EXE ?? ''
+      const { child, exited } = startBrowser([exe, ...splitWindowsArgs(e.env?.BADTIME_ARGS ?? '')], e.cwd)
+      yield { stream: 'stdout', text: `bad-time-pid ${child.pid}\r\n` }
+      await Promise.race([exited, stopped])
+      return { value: { code: 0, signal: null } }
+    }
+    const { child, exited } = startBrowser(e.argv, e.cwd)
     try {
       await Promise.race([exited, stopped])
     } finally {
@@ -102,10 +121,10 @@ function makeWorld(on: On, os: Os = 'mac', setup: Setup = {}): World {
     return { value: { code: 0, signal: null } }
   })
   on('process.run', async (_$, e) => {
-    world.runs.push({ argv: e.argv, cwd: e.init?.cwd })
-    const ok = (stdout = '') => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     const bin = e.argv[0] ?? ''
-    const last = e.argv.at(-1) ?? ''
+    const last = bin.endsWith('powershell.exe') ? (decodeScript(e.argv) ?? '') : (e.argv.at(-1) ?? '')
+    world.runs.push({ argv: e.argv, cwd: e.init?.cwd, script: bin.endsWith('powershell.exe') ? last : undefined })
+    const ok = (stdout = '') => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     if (bin === '/bin/ps' || (bin.endsWith('powershell.exe') && last.includes('Win32_Process'))) {
       const rows = world.live().map(c => `${c.pid} ${c.argv.map(a => (a.includes(' ') ? `"${a}"` : a)).join(' ')}`)
       return ok([...rows, ...world.foreign].join('\n'))
@@ -140,6 +159,32 @@ function typed(text: string) {
 // What a session passes `command.run` when the person types /badtime <args>.
 function badtime(args: string) {
   return { command: 'badtime', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as const
+}
+
+// PowerShell scripts arrive as -EncodedCommand: base64 of UTF-16LE.
+function decodeScript(argv: readonly string[]): string | undefined {
+  const at = argv.indexOf('-EncodedCommand')
+  const encoded = at < 0 ? undefined : argv[at + 1]
+  if (encoded === undefined) return undefined
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+  const bytes: number[] = []
+  const clean = encoded.replace(/=+$/, '')
+  for (let i = 0; i < clean.length; i += 4) {
+    const n = [0, 1, 2, 3].reduce((acc, k) => (acc << 6) | Math.max(0, alphabet.indexOf(clean.charAt(i + k))), 0)
+    const count = Math.min(3, Math.floor(((clean.length - i) * 6) / 8))
+    for (let k = 0; k < count; k += 1) bytes.push((n >> (16 - 8 * k)) & 0xff)
+  }
+  let text = ''
+  for (let i = 0; i + 1 < bytes.length; i += 2) text += String.fromCharCode((bytes[i] ?? 0) | ((bytes[i + 1] ?? 0) << 8))
+  return text
+}
+
+// How Windows splits a command line into arguments (no escaped quotes here).
+function splitWindowsArgs(line: string): string[] {
+  const out: string[] = []
+  const re = /"([^"]*)"|(\S+)/g
+  for (let m = re.exec(line); m !== null; m = re.exec(line)) out.push(m[1] ?? m[2] ?? '')
+  return out
 }
 
 function done(turnId: string, isAborted = false) {
@@ -471,14 +516,65 @@ describe('commands and config', () => {
 })
 
 describe('windows', () => {
-  test('uses absolute Windows paths, a quoted-safe profile and a centered window', async ($, on) => {
+  test('starts the browser through a PowerShell launcher with a centered window, never by itself', async ($, on) => {
     const w = makeWorld(on, 'windows')
     const child = await openGame($, w)
+    const launcher = w.spawns[0]
+    expect(launcher?.argv[0]).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+    expect(launcher?.argv).toContain('-EncodedCommand')
+    expect(launcher?.argv).not.toContain('-Command')
+    expect(decodeScript(launcher?.argv ?? [])).toContain('Start-Process -FilePath $env:BADTIME_EXE')
+    expect(decodeScript(launcher?.argv ?? [])).toContain('SetForegroundWindow')
+    expect(launcher?.cwd).toBe(HOME.windows)
     expect(child.argv[0]).toBe(WIN_CHROME)
+    expect(arg(child, '--app=')).toBe(URL_DEFAULT)
     expect(arg(child, '--user-data-dir=')).toBe('C:\\Users\\Fatih Baştan\\.bad-time\\profiles\\slot-1')
     expect(arg(child, '--window-size=')).toBe('860,645')
     expect(arg(child, '--window-position=')).toBe('530,198')
     for (const r of w.runs) expect(/^[A-Z]:\\/.test(r.argv[0] ?? '')).toBe(true)
+  })
+
+  test('after Claude answers, the browser is asked to close by its own pid, gently', async ($, on) => {
+    const w = makeWorld(on, 'windows')
+    const child = await openGame($, w)
+    await $.turn.complete(done('t1'))
+    await w.clock.advance(5_000)
+    expect(child.alive).toBe(false)
+    const closes = w.runs.filter(r => (r.argv[0] ?? '').endsWith('taskkill.exe'))
+    expect(closes[0]?.argv).toEqual(['C:\\Windows\\System32\\taskkill.exe', '/PID', String(child.pid), '/T'])
+    await $.turn.start({ text: 'next', turnId: 't2' })
+    await w.clock.advance(3_000)
+    expect(w.live().length).toBe(1)
+  })
+
+  test('closing the window yourself frees the slot, and the next prompt opens a new one', async ($, on) => {
+    const w = makeWorld(on, 'windows')
+    const first = await openGame($, w)
+    first.exit()
+    await w.clock.advance(500)
+    await $.turn.complete(done('t1'))
+    await w.clock.advance(5_000)
+    await $.turn.start({ text: 'next', turnId: 't2' })
+    await w.clock.advance(3_000)
+    expect(w.live().length).toBe(1)
+    expect(arg(w.live()[0], '--user-data-dir=')).toContain('slot-1')
+  })
+
+  test('quitting Claude closes the browser too', async ($, on) => {
+    const w = makeWorld(on, 'windows')
+    const child = await openGame($, w)
+    await $.session.end({ reason: 'prompt_input_exit', sessionId: 's1', resume: {} as never })
+    await w.clock.advance(100)
+    expect(child.alive).toBe(false)
+  })
+
+  test('the chime plays through PowerShell with the sound path passed outside the script', async ($, on) => {
+    const w = makeWorld(on, 'windows')
+    await openGame($, w)
+    await $.turn.complete(done('t1'))
+    await w.clock.advance(100)
+    const sound = w.runs.find(r => r.script?.includes('SoundPlayer'))
+    expect(sound?.script).toBe('(New-Object System.Media.SoundPlayer $env:BADTIME_SOUND).PlaySync()')
   })
 
   test('a leftover Windows window is found by its profile and closed with taskkill', async ($, on) => {

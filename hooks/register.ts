@@ -51,6 +51,9 @@ type Sys = {
 
 type Win = {
   stream: HookStream<ProcessSpawnChunk, ProcessSpawnResult>
+  // Windows only: the browser's own pid, printed by the launcher. There the
+  // stream is the PowerShell launcher, which waits for the browser to exit.
+  pid?: number
   slot: number
   startedAt: number
   closing: boolean
@@ -70,6 +73,41 @@ const QUICK_EXIT_MS = 3_000
 const CLOSE_GRACE_MS = 3_000
 const SOUND_ASSET = 'sounds/notify.wav'
 const USAGE = 'Usage: /badtime [on | off | now | close | status]'
+
+// Windows: start the browser the way a person's own shell does (Start-Process,
+// so it gets a normal window and none of Claude Code's pipes), print its pid,
+// bring its window to the front, then wait for it to exit. Started directly
+// by Claude Code, Chrome on Windows drew an empty window. Inputs arrive in
+// environment variables, so nothing is ever spliced into the script.
+const WINDOWS_LAUNCHER = [
+  "$ErrorActionPreference = 'Stop'",
+  '$p = Start-Process -FilePath $env:BADTIME_EXE -ArgumentList $env:BADTIME_ARGS -PassThru',
+  "[Console]::Out.WriteLine('bad-time-pid ' + $p.Id)",
+  '[Console]::Out.Flush()',
+  'try {',
+  "  Add-Type -Namespace BadTime -Name Win -MemberDefinition '",
+  '    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
+  '    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, IntPtr process);',
+  '    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();',
+  '    [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint thread, uint otherThread, bool attach);',
+  '    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr window, int command);',
+  '    [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr window);',
+  '    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);',
+  "  '",
+  '  for ($i = 0; $i -lt 50 -and -not $p.HasExited -and $p.MainWindowHandle -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 200; $p.Refresh() }',
+  '  $h = $p.MainWindowHandle',
+  '  if ($h -ne [IntPtr]::Zero) {',
+  '    $front = [BadTime.Win]::GetWindowThreadProcessId([BadTime.Win]::GetForegroundWindow(), [IntPtr]::Zero)',
+  '    $me = [BadTime.Win]::GetCurrentThreadId()',
+  '    [void][BadTime.Win]::AttachThreadInput($me, $front, $true)',
+  '    [void][BadTime.Win]::ShowWindow($h, 9)',
+  '    [void][BadTime.Win]::BringWindowToTop($h)',
+  '    [void][BadTime.Win]::SetForegroundWindow($h)',
+  '    [void][BadTime.Win]::AttachThreadInput($me, $front, $false)',
+  '  }',
+  "} catch { [Console]::Error.WriteLine('bad-time-front ' + $_) }",
+  '$p.WaitForExit()',
+].join('\n')
 
 // One id per loaded module: slots are owned by it, so a /clear (new session
 // id, same process) keeps its window, and a reload's stale slot is reclaimed.
@@ -218,6 +256,7 @@ export const register: Register = (on, options) => {
         if (w !== undefined) {
           w.closing = true
           w.heartbeat?.cancel()
+          if (w.pid !== undefined) void endWindowsBrowser($, w.pid)
           stopStream(w)
           void releaseSlot($, w.slot)
         }
@@ -227,6 +266,11 @@ export const register: Register = (on, options) => {
     }
     return next(e)
   })
+}
+
+async function endWindowsBrowser($: Api, pid: number): Promise<void> {
+  const sys = await system($)
+  if (sys?.os === 'windows') await windowsClose($, sys, pid, true)
 }
 
 // ---------------------------------------------------------------- commands
@@ -339,8 +383,14 @@ async function startWindow($: Api): Promise<void> {
     '--disable-extensions',
     '--disable-sync',
   ]
+  const request = sys.os === 'windows' ? windowsLaunch(sys, argv) : { argv, cwd: sys.home }
+  if (request === undefined) {
+    warnOnce($, 'launcher', 'could not build the Windows launch command; check browserPath in /config')
+    await releaseSlot($, slot)
+    return
+  }
   const w: Win = {
-    stream: $.process.spawn({ argv, cwd: sys.home }),
+    stream: $.process.spawn(request),
     slot,
     startedAt: await $.clock.now(),
     closing: false,
@@ -356,9 +406,15 @@ async function startWindow($: Api): Promise<void> {
 async function watch($: Api, w: Win): Promise<void> {
   let failedToStart = false
   let pieces = 0
+  let out = ''
   try {
     for await (const chunk of w.stream) {
       pieces += 1
+      if (w.pid === undefined && chunk.stream === 'stdout') {
+        out = (out + chunk.text).slice(-200)
+        const m = /bad-time-pid (\d{1,10})/.exec(out)
+        if (m !== null && Number.isSafeInteger(Number(m[1]))) w.pid = Number(m[1])
+      }
       if (pieces <= 3) debug($, `browser said: ${chunk.text.slice(0, 200)}`)
     }
   } catch (err) {
@@ -384,13 +440,45 @@ async function closeWindow($: Api, byMod: boolean): Promise<void> {
   if (w === undefined || w.closing) return
   w.closing = true
   if (byMod) closedAt = await $.clock.now()
-  // Ending the stream asks the browser to quit (SIGTERM on macOS and Linux).
-  stopStream(w)
+  const sys = await system($)
+  if (sys?.os === 'windows') {
+    // Ask the browser itself to close (a window close, not a kill); the
+    // launcher then sees it exit and the stream ends.
+    if (w.pid !== undefined) void windowsClose($, sys, w.pid, false)
+  } else {
+    // Ending the stream asks the browser to quit (SIGTERM on macOS and Linux).
+    stopStream(w)
+  }
   // If it is still up after the grace, close it by its profile, checked.
   $.clock.after(CLOSE_GRACE_MS, () => {
     if (w.ended) return
-    void forceClose($, w.slot)
+    void forceClose($, w)
   })
+}
+
+async function windowsClose($: Api, sys: Sys, pid: number, force: boolean): Promise<void> {
+  try {
+    if (sys.taskkill === undefined || !Number.isSafeInteger(pid) || pid <= 1) return
+    const args = force ? ['/PID', String(pid), '/T', '/F'] : ['/PID', String(pid), '/T']
+    await $.process.run([sys.taskkill, ...args], { cwd: sys.home })
+  } catch (err) {
+    debug($, `close on Windows: ${describe(err)}`)
+  }
+}
+
+// The command line for Start-Process: one string, each argument quoted when
+// it holds a space. None may hold a quote or a line break, or end in a
+// backslash, so the quoting can't be broken out of.
+function windowsLaunch(sys: Sys, argv: readonly string[]): { argv: string[]; cwd: string; env: Record<string, string> } | undefined {
+  const [exe, ...args] = argv
+  if (sys.powershell === undefined || exe === undefined) return undefined
+  if ([exe, ...args].some(a => /["\r\n]/.test(a) || a.endsWith('\\'))) return undefined
+  const line = args.map(a => (/\s/.test(a) ? `"${a}"` : a)).join(' ')
+  return {
+    argv: powershellArgv(sys.powershell, WINDOWS_LAUNCHER),
+    cwd: sys.home,
+    env: { BADTIME_EXE: exe, BADTIME_ARGS: line },
+  }
 }
 
 function stopStream(w: Win): void {
@@ -402,10 +490,11 @@ function stopStream(w: Win): void {
   }
 }
 
-async function forceClose($: Api, slot: number): Promise<void> {
+async function forceClose($: Api, w: Win): Promise<void> {
   try {
     const sys = await system($)
-    if (sys !== undefined) await killSlot($, sys, slot)
+    if (sys !== undefined) await killSlot($, sys, w.slot)
+    stopStream(w)
   } catch (err) {
     debug($, `force close: ${describe(err)}`)
   }
@@ -499,10 +588,7 @@ async function ownedPids($: Api, sys: Sys, slot: number): Promise<number[]> {
     if (sys.powershell === undefined) return []
     const script =
       "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*bad-time*' } | ForEach-Object { '{0} {1}' -f $_.ProcessId, $_.CommandLine }"
-    const run = await $.process.run([sys.powershell, '-NoProfile', '-NonInteractive', '-Command', script], {
-      cwd: sys.home,
-      timeoutMs: 20_000,
-    })
+    const run = await $.process.run(powershellArgv(sys.powershell, script), { cwd: sys.home, timeoutMs: 20_000 })
     listing = run.stdout
   } else {
     if (sys.ps === undefined) return []
@@ -678,7 +764,7 @@ async function readScreen($: Api, sys: Sys): Promise<{ w: number; h: number } | 
   } else if (sys.os === 'windows' && sys.powershell !== undefined) {
     const script =
       "Add-Type -AssemblyName System.Windows.Forms; $a = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea; '{0}x{1}' -f $a.Width, $a.Height"
-    out = (await $.process.run([sys.powershell, '-NoProfile', '-NonInteractive', '-Command', script], { cwd: sys.home, timeoutMs: 15_000 })).stdout
+    out = (await $.process.run(powershellArgv(sys.powershell, script), { cwd: sys.home, timeoutMs: 15_000 })).stdout
   } else {
     return undefined
   }
@@ -714,8 +800,8 @@ async function chime($: Api): Promise<void> {
     }
     const file = [$.plugin.root, 'sounds', 'notify.wav'].join(sys.sep)
     if (sys.os === 'windows' && sys.powershell !== undefined) {
-      const script = `(New-Object System.Media.SoundPlayer '${powershellQuote(file)}').PlaySync()`
-      await $.process.run([sys.powershell, '-NoProfile', '-NonInteractive', '-Command', script], { cwd: sys.home, timeoutMs: 10_000 })
+      const script = '(New-Object System.Media.SoundPlayer $env:BADTIME_SOUND).PlaySync()'
+      await $.process.run(powershellArgv(sys.powershell, script), { cwd: sys.home, timeoutMs: 10_000, env: { BADTIME_SOUND: file } })
     } else if (sys.player !== undefined) {
       await $.process.run([sys.player, file], { cwd: sys.home, timeoutMs: 10_000 })
     }
@@ -837,9 +923,30 @@ function trimSep(path: string): string {
   return path.length > 1 ? path.replace(/[\\/]+$/, '') : path
 }
 
-// PowerShell treats the curly quotes as quote marks too: double every kind.
-function powershellQuote(text: string): string {
-  return text.replace(/['\u2018\u2019\u201A\u201B]/g, '$&$&')
+// Every PowerShell script goes in as -EncodedCommand (UTF-16LE, base64), so no
+// quoting rule of the Windows command line or of PowerShell can touch it.
+function powershellArgv(powershell: string, script: string): string[] {
+  return [powershell, '-NoProfile', '-NonInteractive', '-EncodedCommand', utf16Base64(script)]
+}
+
+function utf16Base64(text: string): string {
+  const bytes: number[] = []
+  for (let i = 0; i < text.length; i += 1) {
+    const unit = text.charCodeAt(i)
+    bytes.push(unit & 0xff, unit >> 8)
+  }
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+  let out = ''
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i] ?? 0
+    const b = bytes[i + 1]
+    const c = bytes[i + 2]
+    const n = (a << 16) | ((b ?? 0) << 8) | (c ?? 0)
+    out += alphabet.charAt((n >> 18) & 63) + alphabet.charAt((n >> 12) & 63)
+    out += b === undefined ? '=' : alphabet.charAt((n >> 6) & 63)
+    out += c === undefined ? '=' : alphabet.charAt(n & 63)
+  }
+  return out
 }
 
 function makeId(): string {

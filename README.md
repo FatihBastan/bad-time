@@ -62,6 +62,7 @@ With `keep` on a Mac, quit the game with ⌘Q or `/badtime close`: the red close
 - **Its own browser profile.** The game runs in `~/.bad-time/profiles/slot-N`, with no logins, cookies or extensions, separate from your normal browser.
 - **Closes only its own windows.** A leftover window from a crashed session is found by that profile folder in its command line, never by a saved process id.
 - **Nothing from the repo runs.** Every helper is called by its absolute path, without a shell, from your home folder.
+- **On Windows** the browser is started by a small PowerShell launcher (`Start-Process`, as your own shell would), which also brings the game to the front. Every PowerShell script is sent encoded, and the browser path and arguments go in through environment variables, never spliced into the script.
 
 ### What it reaches
 
