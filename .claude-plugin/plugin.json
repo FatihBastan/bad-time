@@ -1,0 +1,65 @@
+{
+  "name": "bad-time",
+  "version": "0.1.0",
+  "description": "Opens Bad Time Simulator (by Jcw87) in its own window while Claude works. Not affiliated with Undertale or Toby Fox.",
+  "author": { "name": "Fatih Baştan", "url": "https://github.com/FatihBastan" },
+  "homepage": "https://github.com/FatihBastan/bad-time",
+  "repository": "https://github.com/FatihBastan/bad-time",
+  "license": "MIT",
+  "keywords": ["mod", "game", "while-you-wait"],
+  "userConfig": {
+    "onFinish": {
+      "type": "string",
+      "title": "When Claude finishes",
+      "description": "keep: the fight stays open between prompts. close: the window closes after the countdown.",
+      "options": ["keep", "close"],
+      "default": "keep"
+    },
+    "delaySeconds": {
+      "type": "number",
+      "title": "Delay before opening",
+      "description": "Seconds Claude must be working before the window opens. Shorter turns never open it.",
+      "default": 2,
+      "min": 0,
+      "max": 30
+    },
+    "countdownSeconds": {
+      "type": "number",
+      "title": "Countdown before closing",
+      "description": "Only for onFinish = close: seconds between the chime and the window closing.",
+      "default": 3,
+      "min": 0,
+      "max": 10
+    },
+    "sounds": {
+      "type": "boolean",
+      "title": "Chime",
+      "description": "A short chime when Claude needs you or finishes while the game is open.",
+      "default": true
+    },
+    "strayKeyGuard": {
+      "type": "boolean",
+      "title": "Stray-key guard",
+      "description": "Holds a prompt sent within 1.5 s of the mod closing the window, so game keys never send one by accident.",
+      "default": true
+    },
+    "windowSize": {
+      "type": "string",
+      "title": "Window size",
+      "description": "auto (centered, about 60% of the screen height), or WIDTHxHEIGHT such as 900x700. The window is resizable either way.",
+      "default": "auto"
+    },
+    "browserPath": {
+      "type": "string",
+      "title": "Browser path",
+      "description": "Full path to Chrome, Edge, Chromium or Brave. Leave empty to find one.",
+      "default": ""
+    },
+    "url": {
+      "type": "string",
+      "title": "Game URL",
+      "description": "Must be https. Point it at a mirror if the original page is down.",
+      "default": "https://jcw87.github.io/c2-sans-fight/"
+    }
+  }
+}
