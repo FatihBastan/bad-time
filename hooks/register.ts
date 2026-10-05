@@ -1,16 +1,7 @@
-// bad-time: opens Bad Time Simulator (by Jcw87) in its own browser window
-// while Claude works. Not affiliated with Undertale or Toby Fox.
-//
-// Ground rules this module keeps:
-// - Hands off Claude. Every hook returns `next(e)` exactly once, untouched.
-//   The only exception is the stray-key guard on the user's OWN prompt
-//   (prompt.submit from the composer), which `strayKeyGuard` turns off.
-// - A bad-time failure never reaches Claude: each hook's own work runs in a
-//   try/catch (or detached) before `next(e)`, so the worst case is no window.
-// - Nothing runs through a shell, every helper is an absolute path, and every
-//   child runs from the home folder, never the repo.
-// - A process is closed only when its command line names one of our own
-//   profile folders (~/.bad-time/profiles/slot-N).
+// bad-time: opens Bad Time Simulator (by Jcw87) in its own browser window while
+// Claude works. Not affiliated with UNDERTALE or Toby Fox.
+// Every hook passes Claude's events on untouched; the only exception is the
+// opt-out stray-key guard on the user's own prompt.
 
 import type {
   EngineInterface,
@@ -52,21 +43,14 @@ type Sys = {
 
 type Win = {
   stream: HookStream<ProcessSpawnChunk, ProcessSpawnResult>
-  // Windows only: the browser's own pid, printed by the launcher. There the
-  // stream is the PowerShell launcher, which waits for the browser to exit.
   pid?: number
   slot: number
   startedAt: number
   closing: boolean
   ended: boolean
-  // Paused: minimized (Windows) or hidden (macOS) between prompts. A hidden
-  // page stops drawing, so the game waits exactly where you left it.
   hidden: boolean
-  // Windows: the file the launcher watches for `show <n>` / `hide <n>`.
   control?: string
   seq: number
-  // macOS: renderer pids frozen while Claude needs you, and the watch that
-  // thaws them once you come back to the game.
   held?: number[]
   holdWatch?: Timer
   heartbeat?: Timer
@@ -85,12 +69,6 @@ const CLOSE_GRACE_MS = 3_000
 const SOUND_ASSET = 'sounds/notify.wav'
 const USAGE = 'Usage: /badtime [on | off | now | close | status]'
 
-// Windows: start the browser the way a person's own shell does (Start-Process,
-// so it gets a normal window and none of Claude Code's pipes), print its pid,
-// bring its window to the front, then watch a control file for `show` and
-// `hide` until the browser exits. Started directly by Claude Code, Chrome on
-// Windows drew an empty window. Inputs arrive in environment variables, so
-// nothing is ever spliced into the script.
 const WINDOWS_LAUNCHER = [
   "$ErrorActionPreference = 'Stop'",
   'function Read-Control { try { return [IO.File]::ReadAllText($env:BADTIME_CONTROL).Trim() } catch { return $null } }',
@@ -143,9 +121,6 @@ const WINDOWS_LAUNCHER = [
   '  $w = Find-Game',
   '  if ($w -ne [IntPtr]::Zero) { [void][BadTime.Win]::ShowWindow($w, 6) }',
   '}',
-  // The fight runs only while its window is in front and Claude does not
-  // need you; otherwise the page's renderer processes are suspended, which
-  // freezes the game where it stands without moving the keyboard focus.
   '$script:frozen = $false',
   '$script:frozenIds = @()',
   "function Get-Renderers { @(Get-CimInstance Win32_Process -Filter ('ParentProcessId = ' + $p.Id) | Where-Object { $_.CommandLine -like '*--type=renderer*' } | ForEach-Object { [int]$_.ProcessId }) }",
@@ -185,8 +160,6 @@ const WINDOWS_LAUNCHER = [
   '  try {',
   '    if ($ready -and $script:h -ne [IntPtr]::Zero) {',
   '      $isFront = [BadTime.Win]::GetForegroundWindow() -eq $script:h',
-  // Coming back to the game ends a hold; the fight resumes after the grace,
-  // so there is a moment to get your hands back on the keys.
   '      if ($isFront -and -not $wasFront) { $hold = $false; $resumeAt = (Get-Date).AddMilliseconds($grace) }',
   '      $wasFront = $isFront',
   '      $waiting = $resumeAt -ne $null -and (Get-Date) -lt $resumeAt',
@@ -196,8 +169,6 @@ const WINDOWS_LAUNCHER = [
   '}',
 ].join('\n')
 
-// macOS: hide or bring back the browser's own app by its pid. NSRunningApplication
-// needs no Accessibility permission. argv: [show|hide, pid].
 const MAC_WINDOW = [
   'function run(argv) {',
   "  ObjC.import('AppKit')",
@@ -210,8 +181,6 @@ const MAC_WINDOW = [
   '}',
 ].join('\n')
 
-// One id per loaded module: slots are owned by it, so a /clear (new session
-// id, same process) keeps its window, and a reload's stale slot is reclaimed.
 const INSTANCE = makeId()
 
 let cfg: Config = readConfig({}, [])
@@ -306,8 +275,6 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // Claude needs you: alert only. The window stays open and the decision is
-  // untouched; you switch to the terminal yourself, then back to the game.
   on('classic.PermissionRequest', async ($, e, next) => {
     try {
       if (win !== undefined && !win.closing && !win.hidden) void needsYou($)
@@ -326,8 +293,6 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // Stray-key guard: game keys typed into the terminal right after the mod
-  // closed the window must not send a prompt. The text goes back in the box.
   on('prompt.submit', async ($, e, next) => {
     try {
       if (
@@ -375,8 +340,6 @@ async function endWindowsBrowser($: Api, pid: number): Promise<void> {
   const sys = await system($)
   if (sys?.os === 'windows') await windowsClose($, sys, pid, true)
 }
-
-// ---------------------------------------------------------------- commands
 
 async function runCommand($: Api, args: string): Promise<string> {
   const verb = args.trim().toLowerCase() || 'on'
@@ -441,11 +404,7 @@ async function statusText($: Api): Promise<string> {
   ].join('\n')
 }
 
-// ---------------------------------------------------------------- window
-
 async function openForTurn($: Api, gen: number): Promise<void> {
-  // A window the mod is still closing (close mode, a new turn right after)
-  // has to finish first, or the new one would share its profile.
   for (let i = 0; i < 16 && win !== undefined && win.closing; i += 1) await pause($, 250)
   if (gen !== turnGen || activeTurn === undefined || !enabled) return
   if (win !== undefined && !win.closing && win.hidden) {
@@ -455,8 +414,6 @@ async function openForTurn($: Api, gen: number): Promise<void> {
   await launch($)
 }
 
-// Pause: send the window to the background; the hidden page stops drawing,
-// so the fight waits. Where it can't be hidden (Linux), it closes instead.
 async function pauseWindow($: Api): Promise<void> {
   if (launching !== undefined) await launching
   const w = win
@@ -479,7 +436,6 @@ async function resumeWindow($: Api): Promise<void> {
   if (sys === undefined) return
   w.hidden = false
   if (!(await setShown($, sys, w, true))) {
-    // Could not bring it back: start over with a fresh window.
     await closeWindow($, false)
     for (let i = 0; i < 16 && win !== undefined; i += 1) await pause($, 250)
     await launch($)
@@ -542,7 +498,6 @@ async function startWindow($: Api): Promise<void> {
     warnOnce($, 'slots', `all ${SLOT_COUNT} game windows are in use by other Claude sessions`)
     return
   }
-  // We hold this slot now, so anything still using its profile is an orphan.
   await killSlot($, sys, slot)
   const geo = await geometry($, sys)
   const argv = [
@@ -581,8 +536,6 @@ async function startWindow($: Api): Promise<void> {
   void watch($, w)
 }
 
-// The read loop is the window's life: it ends when the browser exits, for
-// whatever reason, and that is when the slot is given back.
 async function watch($: Api, w: Win): Promise<void> {
   let failedToStart = false
   let pieces = 0
@@ -622,14 +575,10 @@ async function closeWindow($: Api, byMod: boolean): Promise<void> {
   if (byMod) closedAt = await $.clock.now()
   const sys = await system($)
   if (sys?.os === 'windows') {
-    // Ask the browser itself to close (a window close, not a kill); the
-    // launcher then sees it exit and the stream ends.
     if (w.pid !== undefined) void windowsClose($, sys, w.pid, false)
   } else {
-    // Ending the stream asks the browser to quit (SIGTERM on macOS and Linux).
     stopStream(w)
   }
-  // If it is still up after the grace, close it by its profile, checked.
   $.clock.after(CLOSE_GRACE_MS, () => {
     if (w.ended) return
     void forceClose($, w)
@@ -646,9 +595,6 @@ async function windowsClose($: Api, sys: Sys, pid: number, force: boolean): Prom
   }
 }
 
-// The command line for Start-Process: one string, each argument quoted when
-// it holds a space. None may hold a quote or a line break, or end in a
-// backslash, so the quoting can't be broken out of.
 function windowsLaunch(
   sys: Sys,
   argv: readonly string[],
@@ -667,11 +613,8 @@ function windowsLaunch(
 
 function stopStream(w: Win): void {
   try {
-    // The value is never read; the call is what ends the child.
     void w.stream.return(undefined as unknown as ProcessSpawnResult).catch(() => undefined)
-  } catch {
-    // already finished
-  }
+  } catch {}
 }
 
 async function forceClose($: Api, w: Win): Promise<void> {
@@ -683,8 +626,6 @@ async function forceClose($: Api, w: Win): Promise<void> {
     debug($, `force close: ${describe(err)}`)
   }
 }
-
-// ---------------------------------------------------------------- slots
 
 function profileDir(sys: Sys, slot: number): string {
   return [sys.home, '.bad-time', 'profiles', `slot-${slot}`].join(sys.sep)
@@ -707,8 +648,6 @@ async function claimSlot($: Api): Promise<number | undefined> {
     const now = await $.clock.now()
     if (isSlotRecord(held) && held.owner !== INSTANCE && now - held.beat < STALE_MS) continue
     await $.store.set(key, { owner: INSTANCE, beat: now })
-    // Two sessions can reach a free slot together: the later write wins and
-    // the other moves on to the next slot.
     await pause($, 150)
     const check = await $.store.get(key)
     if (isSlotRecord(check) && check.owner === INSTANCE) return slot
@@ -737,8 +676,6 @@ async function releaseSlot($: Api, slot: number): Promise<void> {
   }
 }
 
-// A session that crashed leaves a slot whose heartbeat stopped: close its
-// window (ownership checked by profile path) and free the slot.
 async function reapStale($: Api): Promise<void> {
   try {
     const sys = await system($)
@@ -757,10 +694,7 @@ async function reapStale($: Api): Promise<void> {
   }
 }
 
-// ---------------------------------------------------------------- processes
-
-// True only for a command line that passes --user-data-dir pointing at our
-// own profile folder for this slot.
+// Matches only a command line whose --user-data-dir is this slot's profile.
 function ownerPattern(slot: number): RegExp {
   return new RegExp(`--user-data-dir="?[^"]*[\\\\/]\\.bad-time[\\\\/]profiles[\\\\/]slot-${slot}(?=["\\s]|$)`)
 }
@@ -790,7 +724,6 @@ async function ownedPids($: Api, sys: Sys, slot: number): Promise<number[]> {
   return pids
 }
 
-// The browser's main process for a slot: ours, and not a helper (--type=).
 async function mainPid($: Api, sys: Sys, slot: number): Promise<number | undefined> {
   if (sys.ps === undefined) return undefined
   const pattern = ownerPattern(slot)
@@ -805,7 +738,6 @@ async function mainPid($: Api, sys: Sys, slot: number): Promise<number | undefin
   return undefined
 }
 
-// The page's renderer processes for a slot: ours, and --type=renderer.
 async function rendererPids($: Api, sys: Sys, slot: number): Promise<number[]> {
   if (sys.ps === undefined) return []
   const pattern = ownerPattern(slot)
@@ -844,8 +776,6 @@ async function killSlot($: Api, sys: Sys, slot: number): Promise<void> {
     debug($, `close slot ${slot}: ${describe(err)}`)
   }
 }
-
-// ---------------------------------------------------------------- system
 
 function system($: Api): Promise<Sys | undefined> {
   sysPromise ??= detectSystem($).catch(err => {
@@ -942,7 +872,6 @@ async function browserCandidates($: Api, sys: Sys): Promise<string[]> {
   return names.flatMap(name => dirs.map(dir => `${trimSep(dir)}/${name}`))
 }
 
-// Centered, about 60% of the screen height, in the game's 4:3 shape.
 async function geometry($: Api, sys: Sys): Promise<{ w: number; h: number; x?: number; y?: number }> {
   const fixed = parseSize(cfg.windowSize)
   const screen = await screenSize($, sys)
@@ -990,21 +919,14 @@ async function readScreen($: Api, sys: Sys): Promise<{ w: number; h: number } | 
   return w >= 640 && h >= 480 ? { w, h } : undefined
 }
 
-// ---------------------------------------------------------------- alerts
-
 async function needsYou($: Api): Promise<void> {
   try {
     $.ui.toast(`Claude needs you: the fight is frozen. Answer in the terminal, then click the game; it resumes ${seconds(cfg.resumeMs)} later.`, { timeoutMs: 8_000 })
-  } catch {
-    // no surface to draw on
-  }
+  } catch {}
   void holdGame($)
   await chime($)
 }
 
-// Freeze the fight where it stands while Claude needs you. The keyboard focus
-// stays where it is, so game keys can't land on Claude's prompt; the fight
-// carries on once you leave the game and come back to it.
 async function holdGame($: Api): Promise<void> {
   try {
     const w = win
@@ -1040,7 +962,6 @@ async function holdGame($: Api): Promise<void> {
           return
         }
         if (!left) return
-        // Back in the game: resume after the grace, if you stay.
         const now = await $.clock.now()
         backSince ??= now
         if (now - backSince >= cfg.resumeMs) await releaseHold($, w)
@@ -1105,8 +1026,6 @@ async function refill($: Api, text: string): Promise<void> {
   }
 }
 
-// ---------------------------------------------------------------- config
-
 function readConfig(o: PluginOptions, out: string[]): Config {
   const str = (key: string, fallback: string): string => {
     const v = o[key]
@@ -1167,8 +1086,6 @@ function parseSize(text: string): { w: number; h: number } | undefined {
   return w >= 320 && w <= 3840 && h >= 320 && h <= 3840 ? { w, h } : undefined
 }
 
-// ---------------------------------------------------------------- small helpers
-
 function pause($: Api, ms: number): Promise<void> {
   return new Promise(resolve => {
     $.clock.after(ms, () => resolve())
@@ -1180,18 +1097,14 @@ function warnOnce($: Api, key: string, text: string): void {
   warned.add(key)
   try {
     $.ui.toast(text, { timeoutMs: 8_000 })
-  } catch {
-    // no surface to draw on
-  }
+  } catch {}
   debug($, text)
 }
 
 function debug($: Api, text: string): void {
   try {
     $.ui.log(`bad-time: ${text}`, { to: 'debug' })
-  } catch {
-    // logging must never break a hook
-  }
+  } catch {}
 }
 
 function describe(err: unknown): string {
@@ -1215,8 +1128,6 @@ function trimSep(path: string): string {
   return path.length > 1 ? path.replace(/[\\/]+$/, '') : path
 }
 
-// Every PowerShell script goes in as -EncodedCommand (UTF-16LE, base64), so no
-// quoting rule of the Windows command line or of PowerShell can touch it.
 function powershellArgv(powershell: string, script: string): string[] {
   return [powershell, '-NoProfile', '-NonInteractive', '-EncodedCommand', utf16Base64(script)]
 }
