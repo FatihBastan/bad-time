@@ -772,7 +772,7 @@ function readConfig(o: PluginOptions, out: string[]): Config {
   return {
     url,
     delayMs: Math.round(num('delaySeconds', 2, 0, 30) * 1000),
-    mode: str('onFinish', 'keep') === 'close' ? 'close' : 'keep',
+    mode: str('onFinish', 'close') === 'keep' ? 'keep' : 'close',
     countdownMs: Math.round(num('countdownSeconds', 3, 0, 10) * 1000),
     sounds: bool('sounds', true),
     strayKeyGuard: bool('strayKeyGuard', true),

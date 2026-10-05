@@ -189,7 +189,25 @@ describe('opening', () => {
     expect(w.children.length).toBe(1)
   })
 
-  test('keep mode: the fight stays open between prompts, with one chime per finished turn', async ($, on) => {
+  test('by default the window closes a few seconds after Claude answers, and the next prompt opens a fresh one', async ($, on) => {
+    const w = makeWorld(on)
+    const first = await openGame($, w)
+    await $.turn.complete(done('t1'))
+    await w.clock.advance(2_000)
+    expect(first.alive).toBe(true)
+    expect(w.chimes).toBe(1)
+    await w.clock.advance(5_000)
+    expect(first.alive).toBe(false)
+    await $.turn.start({ text: 'next', turnId: 't2' })
+    await w.clock.advance(3_000)
+    expect(w.live().length).toBe(1)
+    expect(w.children.length).toBe(2)
+    await $.turn.complete(done('t2'))
+    await w.clock.advance(8_000)
+    expect(w.live().length).toBe(0)
+  })
+
+  test('keep mode: the fight stays open between prompts, with one chime per finished turn', { options: { onFinish: 'keep' } }, async ($, on) => {
     const w = makeWorld(on)
     const child = await openGame($, w)
     await $.turn.complete(done('t1'))

@@ -7,8 +7,9 @@ A Claude Code mod that opens **Bad Time Simulator** in its own window while Clau
 ## What it does
 
 - Once Claude has been working for 2 seconds, a centered game window opens: about 60% of your screen height, in the game's 4:3 shape, and resizable.
-- **The fight stays open between prompts.** When Claude finishes, you hear a short chime; keep playing or switch back.
+- **When Claude answers**, you hear a short chime and the window closes 3 seconds later. Your next prompt opens a fresh one.
 - **When Claude needs you** (a permission prompt or a question), you hear the same chime and the window stays open. Switch to the terminal, answer, and switch back. The mod never answers or changes anything for Claude.
+- Close the window yourself any time; it stays closed until your next prompt.
 - Up to 4 Claude sessions can each have their own window.
 
 ## Install
@@ -42,9 +43,9 @@ Change these in `/config` or with `/plugin configure bad-time@bad-time`.
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| `onFinish` | `keep` | `keep` leaves the fight open between prompts; `close` closes it after the countdown |
+| `onFinish` | `close` | `close` closes the window after Claude answers; `keep` leaves the fight open between prompts |
 | `delaySeconds` | 2 | 0 to 30; shorter turns never open the window |
-| `countdownSeconds` | 3 | 0 to 10; only used with `close` |
+| `countdownSeconds` | 3 | 0 to 10; seconds between the chime and the window closing |
 | `sounds` | on | The short chime when Claude needs you or finishes |
 | `strayKeyGuard` | on | Holds a prompt sent within 1.5 s of the mod closing the window and puts it back in the box |
 | `windowSize` | `auto` | Or `WIDTHxHEIGHT`, such as `900x700`, 320 to 3840 each |
@@ -52,6 +53,8 @@ Change these in `/config` or with `/plugin configure bad-time@bad-time`.
 | `url` | Bad Time Simulator | Must be `https://`; point it at a mirror if the page goes down |
 
 Invalid values fall back to the default, with one toast naming the setting.
+
+With `keep` on a Mac, quit the game with ⌘Q or `/badtime close`: the red close button leaves the browser running with no window, so the mod can't tell it's gone.
 
 ## Safety
 
