@@ -1,12 +1,15 @@
 {
   "name": "bad-time",
   "description": "bad-time: Bad Time Simulator in its own window while Claude works.",
-  "owner": { "name": "Fatih Baştan", "url": "https://github.com/FatihBastan" },
+  "owner": {
+    "name": "Fatih Baştan",
+    "url": "https://github.com/FatihBastan"
+  },
   "plugins": [
     {
       "name": "bad-time",
       "source": "./",
-      "description": "Opens Bad Time Simulator (by Jcw87) in its own window while Claude works. Not affiliated with Undertale or Toby Fox."
+      "description": "Opens Bad Time Simulator (a fan game by Jcw87, recreating the Sans fight from UNDERTALE by Toby Fox) in its own window while Claude works. Not affiliated with either."
     }
   ]
 }

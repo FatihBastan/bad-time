@@ -437,6 +437,7 @@ async function statusText($: Api): Promise<string> {
     `Window: ${window}. Opens after ${seconds(cfg.delayMs)} of work. Chime: ${cfg.sounds ? 'on' : 'off'}.`,
     `Browser: ${browser ?? 'none found (set browserPath)'}.`,
     `Game: ${cfg.url}`,
+    'Bad Time Simulator by Jcw87 (github.com/Jcw87/c2-sans-fight), a fan recreation of the Sans fight from UNDERTALE by Toby Fox. Not affiliated with either.',
   ].join('\n')
 }
 

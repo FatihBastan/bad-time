@@ -2,7 +2,7 @@
 
 A Claude Code mod that opens **Bad Time Simulator** in its own window while Claude works, so you can dodge bones instead of watching a spinner.
 
-> Opens [Bad Time Simulator](https://jcw87.github.io/c2-sans-fight/) by Jcw87 in a browser window. Undertale © Toby Fox. Not affiliated with either. This repo contains no game files: the mod only opens that public page.
+> **The game is not mine.** Bad Time Simulator is a free fan game by [Jcw87](https://github.com/Jcw87) ([source](https://github.com/Jcw87/c2-sans-fight)), recreating the Sans fight from [UNDERTALE](https://undertale.com) by Toby Fox. This mod only opens Jcw87's public page in a browser window; it contains no game files, art or music, and is not affiliated with or endorsed by either of them. See [Credits](#credits).
 
 ## What it does
 
@@ -72,7 +72,7 @@ From `claude plugin validate`:
 
 | Network | Runs processes | Files | Calls a model | Submits prompts |
 | --- | --- | --- | --- | --- |
-| No (the browser loads the page) | The browser, `ps`/`kill` (`powershell`/`taskkill` on Windows), `osascript` for the screen size on macOS, a sound player on Linux and Windows | Only checks that paths exist | No | No |
+| No (the browser loads the game page) | The browser; `ps` and `kill` on macOS and Linux (`kill -STOP`/`-CONT` freezes and resumes the game's own page process); `osascript` on macOS for the screen size, to hide and show the game, and to see which app is in front; `powershell` and `taskkill` on Windows (the launcher, the screen size, the chime, finding and closing leftover game windows); `paplay` or `aplay` on Linux for the chime | Checks that browser and helper paths exist; on Windows writes `~/.bad-time/control/slot-N.txt`, the show/hide/hold switch the launcher reads. The browser keeps its own profile in `~/.bad-time/profiles/` | No | No |
 
 Environment variables read: `HOME`, `PATH`, `OS`, `USERPROFILE`, `SystemRoot`, `ProgramFiles`, `ProgramFiles(x86)`, `LOCALAPPDATA`.
 
@@ -83,6 +83,12 @@ claude plugin validate --strict .
 claude plugin test .
 ```
 
+## Credits
+
+- **Toby Fox** created [UNDERTALE](https://undertale.com): Sans, his fight, and its music, including "MEGALOVANIA", are his. UNDERTALE is a trademark of Toby Fox.
+- **[Jcw87](https://github.com/Jcw87)** made [Bad Time Simulator](https://jcw87.github.io/c2-sans-fight/) ([source](https://github.com/Jcw87/c2-sans-fight)), the free browser recreation of the fight that this mod opens.
+- This mod only opens that page. If you enjoy the fight, play UNDERTALE.
+
 ## License
 
-MIT for this mod's code (see `LICENSE`). The chime in `sounds/` is generated for this mod. Bad Time Simulator is Jcw87's; Undertale and its characters and music are Toby Fox's.
+MIT for this mod's own code and its generated chime (see `LICENSE`). Bad Time Simulator is Jcw87's; UNDERTALE, its characters and its music are Toby Fox's. This repository contains none of their files.
