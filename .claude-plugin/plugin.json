@@ -1,7 +1,7 @@
 {
   "name": "bad-time",
   "displayName": "bad-time",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Opens Bad Time Simulator (a fan game by Jcw87, recreating the Sans fight from UNDERTALE by Toby Fox) in its own window while Claude works. Not affiliated with either.",
   "author": {
     "name": "Fatih Baştan",
