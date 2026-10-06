@@ -448,6 +448,7 @@ describe('hands off Claude', () => {
     expect(script).toContain('if (-not $isFront) { $resumeAt = $null; $banner = $null }')
     expect(script).toContain('"CLAUDE NEEDS YOU"')
     expect(script).toContain('"CLAUDE IS DONE"')
+    expect(script.split('SetLayeredWindowAttributes(Handle, 0, 235, 2);').length - 1).toBe(2)
     expect(script).toContain('if ($waiting) { Show-Countdown (($resumeAt - (Get-Date)).TotalMilliseconds) } else { Hide-Countdown }')
     expect(script).toContain('New-Object BadTime.Countdown')
     expect(script).toContain('protected override bool ShowWithoutActivation { get { return true; } }')
