@@ -7,8 +7,8 @@ A Claude Code mod that opens **Bad Time Simulator** in its own window while Clau
 ## What it does
 
 - Once Claude has been working for 2 seconds, a centered game window opens: about 60% of your screen height, in the game's 4:3 shape, and resizable.
-- **When Claude answers**, you hear a short chime. Finish the attack; once you leave the game window it goes to the background with the fight paused, and your next prompt brings the same fight back. Quitting the session closes it.
-- **When Claude needs you** (a permission prompt or a question), you hear the same chime. Finish the attack (the FIGHT/ACT/ITEM/MERCY menu waits for you), then switch to the terminal and answer. The mod never moves your keyboard focus and never answers or changes anything for Claude.
+- **When Claude is done**, you hear the *done* chime, Claude shows "Claude is done.", and on Windows a green **CLAUDE IS DONE** banner appears across the top of the game. The game stays where it is: minimize it yourself whenever you like. Your next prompt brings the same fight back to the front. Quitting the session closes it.
+- **When Claude needs you** (a permission prompt or a question), you hear a different, more urgent *ask* chime, Claude shows a notice, and on Windows a yellow **CLAUDE NEEDS YOU** banner appears across the top of the game and Claude's taskbar button flashes. Finish the attack (the FIGHT/ACT/ITEM/MERCY menu waits for you), then switch to Claude and answer. Banners go away once you leave the game. The mod never moves your keyboard focus and never answers or changes anything for Claude.
 - **The fight runs only while the game window is in front**: click away and it freezes; click back and it carries on 2.5 seconds later, with a 3-2-1 countdown over the game on Windows.
 - Close the window yourself any time; your next prompt starts a new fight.
 - Up to 4 Claude sessions can each have their own window.
@@ -44,11 +44,11 @@ Change these in `/config` or with `/plugin configure bad-time@bad-time`.
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| `onFinish` | `pause` | `pause` sends the window to the background and continues the fight on your next prompt (closes instead on Linux); `close` starts a fresh fight every prompt; `keep` leaves it on screen |
+| `onFinish` | `pause` | `pause` keeps one fight for the whole session and brings it back to the front on your next prompt (closes instead on Linux, where the fight can't be frozen); `close` closes the window after Claude answers and starts a fresh fight every prompt |
 | `delaySeconds` | 2 | 0 to 30; shorter turns never open the window |
-| `countdownSeconds` | 3 | 0 to 10; seconds after the chime before the window goes to the background (once you've left it) or closes |
+| `countdownSeconds` | 3 | 0 to 10; with `close`, seconds between the chime and the window closing |
 | `resumeDelaySeconds` | 2.5 | 0 to 10; how long the fight stays frozen after you click back into the game |
-| `sounds` | on | The short chime when Claude needs you or finishes |
+| `sounds` | on | The *ask* and *done* chimes |
 | `strayKeyGuard` | on | Holds a prompt sent within 1.5 s of the mod closing the window and puts it back in the box |
 | `windowSize` | `auto` | Or `WIDTHxHEIGHT`, such as `900x700`, 320 to 3840 each |
 | `browserPath` | empty | Full path to a Chromium-based browser; empty means find one |
@@ -56,7 +56,7 @@ Change these in `/config` or with `/plugin configure bad-time@bad-time`.
 
 Invalid values fall back to the default, with one toast naming the setting.
 
-With `keep` on a Mac, quit the game with ⌘Q or `/badtime close`: the red close button leaves the browser running with no window, so the mod can't tell it's gone.
+On a Mac, quit the game with ⌘Q or `/badtime close`: the red close button leaves the browser running with no window, so the mod can't tell it's gone.
 
 ## Safety
 
@@ -72,7 +72,7 @@ From `claude plugin validate`:
 
 | Network | Runs processes | Files | Calls a model | Submits prompts |
 | --- | --- | --- | --- | --- |
-| No (the browser loads the game page) | The browser; `ps` and `kill` on macOS and Linux (`kill -STOP`/`-CONT` freezes and resumes the game's own page process); `osascript` on macOS for the screen size, to hide and show the game, and twice a second while the game is on screen to see which app is in front; `powershell` and `taskkill` on Windows (the launcher, the screen size, the chime, finding and closing leftover game windows); `paplay` or `aplay` on Linux for the chime | Checks that browser and helper paths exist; on Windows writes `~/.bad-time/control/slot-N.txt`, the show/leave switch the launcher reads. The browser keeps its own profile in `~/.bad-time/profiles/` | No | No |
+| No (the browser loads the game page) | The browser; `ps` and `kill` on macOS and Linux (`kill -STOP`/`-CONT` freezes and resumes the game's own page process); `osascript` on macOS for the screen size, to bring the game back on your next prompt, and twice a second while the game is open to see which app is in front; `powershell` and `taskkill` on Windows (the launcher, the screen size, the chime, finding and closing leftover game windows); `paplay` or `aplay` on Linux for the chime | Checks that browser and helper paths exist; on Windows writes `~/.bad-time/control/slot-N.txt`, the switch the launcher reads (bring the game back, show a banner). The browser keeps its own profile in `~/.bad-time/profiles/` | No | No |
 
 Environment variables read: `HOME`, `PATH`, `OS`, `USERPROFILE`, `SystemRoot`, `ProgramFiles`, `ProgramFiles(x86)`, `LOCALAPPDATA`.
 
@@ -91,4 +91,4 @@ claude plugin test .
 
 ## License
 
-MIT for this mod's own code and its generated chime (see `LICENSE`). Bad Time Simulator is Jcw87's; UNDERTALE, its characters and its music are Toby Fox's. This repository contains none of their files.
+MIT for this mod's own code and its generated chimes (see `LICENSE`). Bad Time Simulator is Jcw87's; UNDERTALE, its characters and its music are Toby Fox's. This repository contains none of their files.

@@ -15,7 +15,7 @@ import type {
 
 type Api = EngineInterface
 type Os = 'mac' | 'windows' | 'linux'
-type Mode = 'pause' | 'close' | 'keep'
+type Mode = 'pause' | 'close'
 
 type Config = {
   url: string
@@ -56,8 +56,6 @@ type Win = {
   frozen?: number[]
   wasFront?: boolean
   resumeAt?: number
-  hideOnLeave?: boolean
-  appHidden?: boolean
   heartbeat?: Timer
 }
 
@@ -71,7 +69,6 @@ const STRAY_MS = 1_500
 const CHIME_GAP_MS = 1_500
 const QUICK_EXIT_MS = 3_000
 const CLOSE_GRACE_MS = 3_000
-const SOUND_ASSET = 'sounds/notify.wav'
 const USAGE = 'Usage: /badtime [on | off | now | close | status]'
 
 const WINDOWS_LAUNCHER = [
@@ -96,10 +93,21 @@ const WINDOWS_LAUNCHER = [
   '    [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);',
   '    [DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr handle);',
   '    [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr handle);',
+  '    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr window);',
+  '    [StructLayout(LayoutKind.Sequential)] public struct FlashInfo { public uint Size; public IntPtr Window; public uint Flags; public uint Count; public uint Timeout; }',
+  '    [DllImport("user32.dll")] public static extern bool FlashWindowEx(ref FlashInfo info);',
+  '    public static void Flash(IntPtr window) {',
+  '      FlashInfo f = new FlashInfo();',
+  '      f.Size = (uint)Marshal.SizeOf(typeof(FlashInfo));',
+  '      f.Window = window;',
+  '      f.Flags = 15;',
+  '      FlashWindowEx(ref f);',
+  '    }',
   "  '",
   '  $ready = $true',
   "} catch { [Console]::Error.WriteLine('bad-time-win32 ' + $_) }",
   '$script:h = [IntPtr]::Zero',
+  '$script:claude = [IntPtr]::Zero',
   'function Find-Game {',
   '  if ($script:h -ne [IntPtr]::Zero -and [BadTime.Win]::IsWindow($script:h)) { return $script:h }',
   '  for ($i = 0; $i -lt 50 -and -not $p.HasExited; $i++) {',
@@ -113,7 +121,9 @@ const WINDOWS_LAUNCHER = [
   '  if (-not $ready) { return }',
   '  $w = Find-Game',
   '  if ($w -eq [IntPtr]::Zero) { return }',
-  '  $front = [BadTime.Win]::GetWindowThreadProcessId([BadTime.Win]::GetForegroundWindow(), [IntPtr]::Zero)',
+  '  $was = [BadTime.Win]::GetForegroundWindow()',
+  '  if ($was -ne [IntPtr]::Zero -and $was -ne $w) { $script:claude = $was }',
+  '  $front = [BadTime.Win]::GetWindowThreadProcessId($was, [IntPtr]::Zero)',
   '  $me = [BadTime.Win]::GetCurrentThreadId()',
   '  [void][BadTime.Win]::AttachThreadInput($me, $front, $true)',
   '  [void][BadTime.Win]::ShowWindow($w, 9)',
@@ -121,10 +131,8 @@ const WINDOWS_LAUNCHER = [
   '  [void][BadTime.Win]::SetForegroundWindow($w)',
   '  [void][BadTime.Win]::AttachThreadInput($me, $front, $false)',
   '}',
-  'function Hide-Game {',
-  '  if (-not $ready) { return }',
-  '  $w = Find-Game',
-  '  if ($w -ne [IntPtr]::Zero) { [void][BadTime.Win]::ShowWindow($w, 6) }',
+  'function Flash-Claude {',
+  '  if ($ready -and $script:claude -ne [IntPtr]::Zero -and [BadTime.Win]::IsWindow($script:claude)) { [BadTime.Win]::Flash($script:claude) }',
   '}',
   '$script:frozen = $false',
   '$script:frozenIds = @()',
@@ -148,6 +156,7 @@ const WINDOWS_LAUNCHER = [
   '  $script:frozen = $false',
   '}',
   '$overlay = $null',
+  '$bannerForm = $null',
   'try {',
   '  Add-Type -AssemblyName System.Windows.Forms, System.Drawing',
   "  Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @'",
@@ -203,13 +212,89 @@ const WINDOWS_LAUNCHER = [
   '      Refresh();',
   '    }',
   '  }',
+  '  public class Banner : Form {',
+  '    [StructLayout(LayoutKind.Sequential)]',
+  '    public struct Rect { public int Left; public int Top; public int Right; public int Bottom; }',
+  '    [StructLayout(LayoutKind.Sequential)]',
+  '    public struct Pt { public int X; public int Y; }',
+  '    [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr window, out Rect rect);',
+  '    [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr window, ref Pt point);',
+  '    private Label title;',
+  '    private Label detail;',
+  '    private int height;',
+  '    private string kind;',
+  '    public Banner() {',
+  '      FormBorderStyle = FormBorderStyle.None;',
+  '      ShowInTaskbar = false;',
+  '      StartPosition = FormStartPosition.Manual;',
+  '      BackColor = Color.White;',
+  '      Padding = new Padding(3);',
+  '      detail = new Label();',
+  '      detail.Dock = DockStyle.Fill;',
+  '      detail.TextAlign = ContentAlignment.TopCenter;',
+  '      detail.ForeColor = Color.White;',
+  '      detail.BackColor = Color.Black;',
+  '      title = new Label();',
+  '      title.Dock = DockStyle.Top;',
+  '      title.TextAlign = ContentAlignment.MiddleCenter;',
+  '      title.BackColor = Color.Black;',
+  '      Controls.Add(detail);',
+  '      Controls.Add(title);',
+  '    }',
+  '    protected override bool ShowWithoutActivation { get { return true; } }',
+  '    protected override CreateParams CreateParams {',
+  '      get {',
+  '        CreateParams cp = base.CreateParams;',
+  '        cp.ExStyle |= 0x08000000 | 0x00080000 | 0x00000080 | 0x00000020 | 0x00000008;',
+  '        return cp;',
+  '      }',
+  '    }',
+  '    public void ShowOver(IntPtr game, bool ask) {',
+  '      Rect c;',
+  '      if (!GetClientRect(game, out c)) return;',
+  '      Pt origin = new Pt();',
+  '      if (!ClientToScreen(game, ref origin)) return;',
+  '      int w = c.Right - c.Left;',
+  '      int h = Math.Max(64, (c.Bottom - c.Top) / 7);',
+  '      string want = ask ? "ask" : "done";',
+  '      if (h != height || want != kind) {',
+  '        height = h;',
+  '        kind = want;',
+  '        Size = new Size(Math.Max(200, w - 32), h);',
+  '        title.Height = h * 3 / 5;',
+  '        Font oldTitle = title.Font;',
+  '        Font oldDetail = detail.Font;',
+  '        title.Font = new Font("Consolas", h * 0.36f, FontStyle.Bold, GraphicsUnit.Pixel);',
+  '        detail.Font = new Font("Consolas", h * 0.2f, FontStyle.Regular, GraphicsUnit.Pixel);',
+  '        if (oldTitle != null) oldTitle.Dispose();',
+  '        if (oldDetail != null) oldDetail.Dispose();',
+  '        title.ForeColor = ask ? Color.Yellow : Color.Lime;',
+  '        title.Text = ask ? "CLAUDE NEEDS YOU" : "CLAUDE IS DONE";',
+  '        detail.Text = ask ? "Finish this attack, then answer in Claude" : "Back to Claude whenever you like";',
+  '      }',
+  '      Location = new Point(origin.X + 16, origin.Y + 12);',
+  '      if (!Visible) Show();',
+  '      Refresh();',
+  '    }',
+  '  }',
   '}',
   "'@",
   '  $overlay = New-Object BadTime.Countdown',
+  '  $bannerForm = New-Object BadTime.Banner',
   "} catch { [Console]::Error.WriteLine('bad-time-countdown ' + $_) }",
   'function Show-Countdown($ms) {',
   '  if ($overlay -eq $null) { return }',
   '  $overlay.ShowOver($script:h, [string][int][Math]::Ceiling($ms / 1000))',
+  '  [System.Windows.Forms.Application]::DoEvents()',
+  '}',
+  'function Show-Banner($ask) {',
+  '  if ($bannerForm -eq $null) { return }',
+  '  $bannerForm.ShowOver($script:h, $ask)',
+  '  [System.Windows.Forms.Application]::DoEvents()',
+  '}',
+  'function Hide-Banner {',
+  '  if ($bannerForm -eq $null -or -not $bannerForm.Visible) { return }',
+  '  $bannerForm.Hide()',
   '  [System.Windows.Forms.Application]::DoEvents()',
   '}',
   'function Hide-Countdown {',
@@ -218,8 +303,8 @@ const WINDOWS_LAUNCHER = [
   '  [System.Windows.Forms.Application]::DoEvents()',
   '}',
   "try { Show-Game } catch { [Console]::Error.WriteLine('bad-time-front ' + $_) }",
-  '$hideOnLeave = $false',
   '$wasFront = $true',
+  '$banner = $null',
   '$resumeAt = $null',
   '$grace = 0',
   'if ($env:BADTIME_RESUME_MS -match \'^[0-9]{1,5}$\') { $grace = [int]$env:BADTIME_RESUME_MS }',
@@ -228,7 +313,7 @@ const WINDOWS_LAUNCHER = [
   '  $now = Read-Control',
   '  if ($now -ne $null -and $now -ne $last) {',
   '    $last = $now',
-  "    try { if ($now.StartsWith('show')) { $hideOnLeave = $false; Show-Game } elseif ($now.StartsWith('leave')) { $hideOnLeave = $true } } catch { [Console]::Error.WriteLine('bad-time-control ' + $_) }",
+  "    try { if ($now.StartsWith('show')) { $banner = $null; Show-Game } elseif ($now.StartsWith('ask')) { $banner = 'ask'; Flash-Claude } elseif ($now.StartsWith('done')) { $banner = 'done' } } catch { [Console]::Error.WriteLine('bad-time-control ' + $_) }",
   "    [Console]::Out.WriteLine('bad-time-did ' + $now)",
   '    [Console]::Out.Flush()',
   '  }',
@@ -236,12 +321,12 @@ const WINDOWS_LAUNCHER = [
   '    if ($ready -and $script:h -ne [IntPtr]::Zero) {',
   '      $isFront = [BadTime.Win]::GetForegroundWindow() -eq $script:h',
   '      if ($isFront -and -not $wasFront) { $resumeAt = (Get-Date).AddMilliseconds($grace) }',
-  '      if (-not $isFront) { $resumeAt = $null }',
+  '      if (-not $isFront) { $resumeAt = $null; $banner = $null }',
   '      $wasFront = $isFront',
-  '      if ($hideOnLeave -and -not $isFront) { $hideOnLeave = $false; Hide-Game }',
   '      $waiting = $resumeAt -ne $null -and (Get-Date) -lt $resumeAt',
   '      if (-not $isFront -or $waiting) { Freeze-Game } else { $resumeAt = $null; Thaw-Game }',
   '      if ($waiting) { Show-Countdown (($resumeAt - (Get-Date)).TotalMilliseconds) } else { Hide-Countdown }',
+  "      if ($banner -ne $null) { Show-Banner ($banner -eq 'ask') } else { Hide-Banner }",
   '    }',
   "  } catch { [Console]::Error.WriteLine('bad-time-freeze ' + $_) }",
   '}',
@@ -250,9 +335,8 @@ const WINDOWS_LAUNCHER = [
 const MAC_WINDOW = [
   'function run(argv) {',
   "  ObjC.import('AppKit')",
-  '  var app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(Number(argv[1]))',
+  '  var app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(Number(argv[0]))',
   "  if (app.isNil()) return 'missing'",
-  "  if (argv[0] === 'hide') { app.hide; return 'hidden' }",
   '  app.unhide',
   '  app.activateWithOptions(3)',
   "  return 'shown'",
@@ -271,7 +355,7 @@ let countdown: Timer | undefined
 let win: Win | undefined
 let launching: Promise<void> | undefined
 let closedAt = 0
-let lastChime = 0
+const lastChime: { ask?: number; done?: number } = {}
 let sysPromise: Promise<Sys | undefined> | undefined
 let browserFound: string | undefined
 let screenPromise: Promise<{ w: number; h: number } | undefined> | undefined
@@ -336,15 +420,22 @@ export const register: Register = (on, options) => {
         openTimer?.cancel()
         openTimer = undefined
         const isShown = win !== undefined && !win.closing && !win.hidden
-        if (isShown && !e.isAborted) void chime($)
-        if (cfg.mode !== 'keep' && (isShown || launching !== undefined)) {
+        if (isShown && !e.isAborted) {
+          void chime($, 'done')
+          notice($, 'Claude is done.')
+          void signalGame($, 'done')
+        }
+        const closes = cfg.mode === 'close' || (await system($))?.os === 'linux'
+        if (closes && (isShown || launching !== undefined)) {
           const gen = turnGen
           countdown?.cancel()
           countdown = $.clock.after(Math.max(1, cfg.countdownMs), () => {
             countdown = undefined
             if (gen !== turnGen || activeTurn !== undefined) return
-            void (cfg.mode === 'pause' ? pauseWindow($) : closeWindow($, true))
+            void closeWindow($, true)
           })
+        } else if (win !== undefined && !win.closing) {
+          win.hidden = true
         }
       }
     } catch (err) {
@@ -468,13 +559,11 @@ async function statusText($: Api): Promise<string> {
   const browser = sys === undefined ? undefined : await findBrowser($, sys, false)
   const state = enabled ? 'on' : 'off'
   const mode =
-    cfg.mode === 'pause'
-      ? 'goes to the background once you leave it after Claude finishes, and comes back on your next prompt'
-      : cfg.mode === 'close'
-        ? `closes ${seconds(cfg.countdownMs)} after Claude finishes`
-        : 'stays open between prompts'
+    cfg.mode === 'close'
+      ? `closes ${seconds(cfg.countdownMs)} after Claude finishes`
+      : 'stays open between prompts and comes back to the front on your next prompt'
   const live = win !== undefined && !win.closing ? win : undefined
-  const window = live === undefined ? 'closed' : `${live.hidden ? 'paused in the background' : 'open'} (slot ${live.slot} of ${SLOT_COUNT})`
+  const window = live === undefined ? 'closed' : `open (slot ${live.slot} of ${SLOT_COUNT})`
   return [
     `bad-time is ${state}; the window ${mode}.`,
     `Window: ${window}. Opens after ${seconds(cfg.delayMs)} of work. Chime: ${cfg.sounds ? 'on' : 'off'}.`,
@@ -494,62 +583,39 @@ async function openForTurn($: Api, gen: number): Promise<void> {
   await launch($)
 }
 
-async function pauseWindow($: Api): Promise<void> {
-  if (launching !== undefined) await launching
-  const w = win
-  if (w === undefined || w.closing || w.hidden) return
-  const sys = await system($)
-  if (sys === undefined || sys.os === 'linux') {
-    await closeWindow($, true)
-    return
-  }
-  w.hidden = true
-  if (sys.os === 'mac') {
-    w.hideOnLeave = true
-    return
-  }
-  if (!(await setShown($, sys, w, false))) await closeWindow($, true)
-}
-
 async function resumeWindow($: Api): Promise<void> {
   const w = win
   if (w === undefined || w.closing || !w.hidden) return
   const sys = await system($)
   if (sys === undefined) return
   w.hidden = false
-  if (sys.os === 'mac') {
-    w.hideOnLeave = false
-    if (w.appHidden !== true) return
-    w.appHidden = false
-  }
-  if (!(await setShown($, sys, w, true))) {
+  if (!(await setShown($, sys, w))) {
     await closeWindow($, false)
     for (let i = 0; i < 16 && win !== undefined; i += 1) await pause($, 250)
     await launch($)
   }
 }
 
-async function setShown($: Api, sys: Sys, w: Win, shown: boolean): Promise<boolean> {
-  const verb = shown ? 'show' : 'hide'
+async function setShown($: Api, sys: Sys, w: Win): Promise<boolean> {
   try {
     if (sys.os === 'windows') {
       if (w.control === undefined) return false
       w.seq += 1
-      await $.fs.write(w.control, `${shown ? 'show' : 'leave'} ${w.seq}`)
+      await $.fs.write(w.control, `show ${w.seq}`)
       return true
     }
     if (sys.os === 'mac' && sys.osascript !== undefined) {
       const pid = w.pid ?? (await mainPid($, sys, w.slot))
       if (pid === undefined) return false
       w.pid = pid
-      const run = await $.process.run([sys.osascript, '-l', 'JavaScript', '-e', MAC_WINDOW, verb, String(pid)], {
+      const run = await $.process.run([sys.osascript, '-l', 'JavaScript', '-e', MAC_WINDOW, String(pid)], {
         cwd: sys.home,
         timeoutMs: 10_000,
       })
       return run.exitCode === 0 && !run.stdout.includes('missing')
     }
   } catch (err) {
-    debug($, `${verb}: ${describe(err)}`)
+    debug($, `show: ${describe(err)}`)
   }
   return false
 }
@@ -1010,10 +1076,27 @@ async function readScreen($: Api, sys: Sys): Promise<{ w: number; h: number } | 
 }
 
 async function needsYou($: Api): Promise<void> {
+  notice($, 'Claude needs you. Finish this attack, then answer here: the fight freezes while you are away.')
+  void signalGame($, 'ask')
+  await chime($, 'ask')
+}
+
+function notice($: Api, text: string): void {
   try {
-    $.ui.toast('Claude needs you. Finish this attack, then switch to the terminal: the fight freezes while you are away.', { timeoutMs: 8_000 })
+    $.ui.toast(text, { timeoutMs: 8_000 })
   } catch {}
-  await chime($)
+}
+
+async function signalGame($: Api, kind: 'ask' | 'done'): Promise<void> {
+  try {
+    const w = win
+    const sys = await system($)
+    if (w === undefined || w.control === undefined || sys?.os !== 'windows') return
+    w.seq += 1
+    await $.fs.write(w.control, `${kind} ${w.seq}`)
+  } catch (err) {
+    debug($, `banner: ${describe(err)}`)
+  }
 }
 
 function watchFocus($: Api, sys: Sys, w: Win): void {
@@ -1034,10 +1117,6 @@ async function focusTick($: Api, sys: Sys, w: Win): Promise<void> {
       w.focus?.cancel()
       return
     }
-    if (w.appHidden === true) {
-      await freezePage($, sys, w)
-      return
-    }
     const main = w.pid ?? (await mainPid($, sys, w.slot))
     if (main === undefined) return
     w.pid = main
@@ -1048,12 +1127,6 @@ async function focusTick($: Api, sys: Sys, w: Win): Promise<void> {
     if (isFront && w.wasFront === false) w.resumeAt = now + cfg.resumeMs
     if (!isFront) w.resumeAt = undefined
     w.wasFront = isFront
-    if (w.hideOnLeave === true && !isFront) {
-      w.hideOnLeave = false
-      await freezePage($, sys, w)
-      if (await setShown($, sys, w, false)) w.appHidden = true
-      return
-    }
     const waiting = w.resumeAt !== undefined && now < w.resumeAt
     if (!isFront || waiting) {
       await freezePage($, sys, w)
@@ -1096,19 +1169,19 @@ async function frontPid($: Api, sys: Sys): Promise<number | undefined> {
   return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined
 }
 
-async function chime($: Api): Promise<void> {
+async function chime($: Api, kind: 'ask' | 'done'): Promise<void> {
   try {
     if (!cfg.sounds) return
     const now = await $.clock.now()
-    if (now - lastChime < CHIME_GAP_MS) return
-    lastChime = now
+    if (now - (lastChime[kind] ?? 0) < CHIME_GAP_MS) return
+    lastChime[kind] = now
     const sys = await system($)
     if (sys === undefined) return
     if (sys.os === 'mac') {
-      await $.audio.play({ asset: SOUND_ASSET })
+      await $.audio.play({ asset: `sounds/${kind}.wav` })
       return
     }
-    const file = [$.plugin.root, 'sounds', 'notify.wav'].join(sys.sep)
+    const file = [$.plugin.root, 'sounds', `${kind}.wav`].join(sys.sep)
     if (sys.os === 'windows' && sys.powershell !== undefined) {
       const script = '(New-Object System.Media.SoundPlayer $env:BADTIME_SOUND).PlaySync()'
       await $.process.run(powershellArgv(sys.powershell, script), { cwd: sys.home, timeoutMs: 10_000, env: { BADTIME_SOUND: file } })
@@ -1177,7 +1250,7 @@ function readConfig(o: PluginOptions, out: string[]): Config {
 }
 
 function readMode(value: string): Mode {
-  return value === 'close' || value === 'keep' ? value : 'pause'
+  return value === 'close' ? 'close' : 'pause'
 }
 
 function parseSize(text: string): { w: number; h: number } | undefined {

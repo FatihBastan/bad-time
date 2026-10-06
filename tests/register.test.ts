@@ -19,6 +19,7 @@ type World = {
   front: number | 'game'
   toasts: string[]
   chimes: number
+  sounds: string[]
   fills: string[]
   logs: string[]
   foreign: string[]
@@ -57,6 +58,7 @@ function makeWorld(on: On, os: Os = 'mac', setup: Setup = {}): World {
     front: 'game',
     toasts: [],
     chimes: 0,
+    sounds: [],
     fills: [],
     logs: [],
     foreign: [],
@@ -86,8 +88,9 @@ function makeWorld(on: On, os: Os = 'mac', setup: Setup = {}): World {
     world.logs.push(e.text)
     return { value: undefined }
   })
-  on('audio.play', async () => {
+  on('audio.play', async (_$, e) => {
     world.chimes += 1
+    world.sounds.push(e.clip.asset ?? '')
     return { value: undefined }
   })
   on('prompt.fill', async (_$, e) => {
@@ -254,20 +257,19 @@ describe('opening', () => {
     expect(w.children.length).toBe(1)
   })
 
-  test('pause (default): after Claude answers the window waits until you leave it, then goes to the background; the next prompt brings the same fight back', async ($, on) => {
+  test('pause (default): after Claude answers the game stays where it is with a done chime; the next prompt brings the same fight to the front', async ($, on) => {
     const w = makeWorld(on)
     const game = await openGame($, w)
     await $.turn.complete(done('t1'))
     await w.clock.advance(10_000)
-    const macCalls = () => w.runs.filter(r => r.argv[0] === '/usr/bin/osascript' && r.argv.includes('JavaScript') && r.argv.length === 7)
-    expect(macCalls().length).toBe(0)
-    w.front = 999
-    await w.clock.advance(1_000)
-    expect(macCalls().map(r => r.argv.slice(5))).toEqual([['hide', String(game.pid)]])
+    const bringBack = () => w.runs.filter(r => r.argv[0] === '/usr/bin/osascript' && r.argv.some(a => a.includes('activateWithOptions')))
+    expect(bringBack().length).toBe(0)
     expect(game.alive).toBe(true)
+    expect(w.sounds).toEqual(['sounds/done.wav'])
+    expect(w.toasts).toContain('Claude is done.')
     await $.turn.start({ text: 'next', turnId: 't2' })
     await w.clock.advance(3_000)
-    expect(macCalls().map(r => r.argv[5])).toEqual(['hide', 'show'])
+    expect(bringBack().map(r => r.argv.at(-1))).toEqual([String(game.pid)])
     expect(w.children.length).toBe(1)
     expect(game.alive).toBe(true)
   })
@@ -290,7 +292,7 @@ describe('opening', () => {
     expect(w.live().length).toBe(0)
   })
 
-  test('keep mode: the fight stays open between prompts, with one chime per finished turn', { options: { onFinish: 'keep' } }, async ($, on) => {
+  test('pause: the fight stays open between prompts, with one chime per finished turn', async ($, on) => {
     const w = makeWorld(on)
     const child = await openGame($, w)
     await $.turn.complete(done('t1'))
@@ -404,7 +406,7 @@ describe('hands off Claude', () => {
     const signals = () => w.runs.filter(r => r.argv[0] === '/bin/kill').map(r => r.argv.slice(1).join(' '))
     await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' } })
     await w.clock.advance(2_000)
-    expect(w.chimes).toBe(1)
+    expect(w.sounds).toEqual(['sounds/ask.wav'])
     expect(signals()).toEqual([])
     w.front = 999
     await w.clock.advance(1_000)
@@ -434,14 +436,18 @@ describe('hands off Claude', () => {
     expect(conts().length).toBe(1)
   })
 
-  test('Windows: a question only chimes; the launcher freezes the fight when you leave and counts down when you return', async ($, on) => {
+  test('Windows: a question chimes and puts a banner on the game; the launcher freezes the fight when you leave and counts down when you return', async ($, on) => {
     const w = makeWorld(on, 'windows')
     const game = await openGame($, w)
     expect(game.argv).toContain('--disable-hang-monitor')
     const script = decodeScript(w.spawns[0]?.argv ?? []) ?? ''
     expect(script).toContain('NtSuspendProcess')
     expect(script).toContain('if (-not $isFront -or $waiting) { Freeze-Game } else { $resumeAt = $null; Thaw-Game }')
-    expect(script).toContain('if ($hideOnLeave -and -not $isFront) { $hideOnLeave = $false; Hide-Game }')
+    expect(script).toContain("elseif ($now.StartsWith('ask')) { $banner = 'ask'; Flash-Claude } elseif ($now.StartsWith('done')) { $banner = 'done' }")
+    expect(script).toContain("if ($banner -ne $null) { Show-Banner ($banner -eq 'ask') } else { Hide-Banner }")
+    expect(script).toContain('if (-not $isFront) { $resumeAt = $null; $banner = $null }')
+    expect(script).toContain('"CLAUDE NEEDS YOU"')
+    expect(script).toContain('"CLAUDE IS DONE"')
     expect(script).toContain('if ($waiting) { Show-Countdown (($resumeAt - (Get-Date)).TotalMilliseconds) } else { Hide-Countdown }')
     expect(script).toContain('New-Object BadTime.Countdown')
     expect(script).toContain('protected override bool ShowWithoutActivation { get { return true; } }')
@@ -449,7 +455,7 @@ describe('hands off Claude', () => {
     await $.tool.call({ tool: 'AskUserQuestion', questions: [] } as never)
     await w.clock.advance(100)
     expect(w.chimes).toBe(1)
-    expect([...w.files.values()].at(-1)).toBe('show 0')
+    expect([...w.files.values()].at(-1)).toBe('ask 1')
     expect(game.alive).toBe(true)
   })
 
@@ -637,15 +643,14 @@ describe('windows', () => {
     for (const r of w.runs) expect(/^[A-Z]:\\/.test(r.argv[0] ?? '')).toBe(true)
   })
 
-  test('pause (default): the launcher is told to minimize once you leave the game, and to restore on the next prompt', async ($, on) => {
+  test('pause (default): the launcher shows the done banner and leaves the window alone; the next prompt brings it back', async ($, on) => {
     const w = makeWorld(on, 'windows')
     const game = await openGame($, w)
     expect(w.spawns[0]?.env?.BADTIME_CONTROL).toBe('C:\\Users\\Fatih Baştan\\.bad-time\\control\\slot-1.txt')
-    expect(decodeScript(w.spawns[0]?.argv ?? [])).toContain('ShowWindow($w, 6)')
     await $.turn.complete(done('t1'))
     await w.clock.advance(5_000)
     const control = () => [...w.files.values()].at(-1)
-    expect(control()).toBe('leave 1')
+    expect(control()).toBe('done 1')
     expect(game.alive).toBe(true)
     await $.turn.start({ text: 'next', turnId: 't2' })
     await w.clock.advance(3_000)
