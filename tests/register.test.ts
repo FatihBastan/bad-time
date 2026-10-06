@@ -114,7 +114,7 @@ function makeWorld(on: On, os: Os = 'mac', setup: Setup = {}): World {
   on('process.spawn', async function* (_$, e, next): AsyncGenerator<ProcessSpawnChunk, { value: ProcessSpawnResult }> {
     world.spawns.push({ argv: e.argv, cwd: e.cwd, env: e.env })
     const stopped = new Promise<void>(resolve => next.signal.addEventListener('abort', () => resolve()))
-    const script = (e.argv[0] ?? '').endsWith('powershell.exe') ? decodeScript(e.argv) : undefined
+    const script = (e.argv[0] ?? '').endsWith('powershell.exe') ? (e.env?.BADTIME_LAUNCHER ?? decodeScript(e.argv)) : undefined
     if (script !== undefined) {
       // The Windows launcher: Start-Process detaches the browser, so ending
       // the launcher leaves the browser running, as on a real PC.
@@ -440,7 +440,7 @@ describe('hands off Claude', () => {
     const w = makeWorld(on, 'windows')
     const game = await openGame($, w)
     expect(game.argv).toContain('--disable-hang-monitor')
-    const script = decodeScript(w.spawns[0]?.argv ?? []) ?? ''
+    const script = w.spawns[0]?.env?.BADTIME_LAUNCHER ?? ''
     expect(script).toContain('NtSuspendProcess')
     expect(script).toContain('if (-not $isFront -or $waiting) { Freeze-Game } else { $resumeAt = $null; Thaw-Game }')
     expect(script).toContain("elseif ($now.StartsWith('ask')) { $banner = 'ask'; Flash-Claude } elseif ($now.StartsWith('done')) { $banner = 'done' }")
@@ -633,8 +633,9 @@ describe('windows', () => {
     expect(launcher?.argv[0]).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
     expect(launcher?.argv).toContain('-EncodedCommand')
     expect(launcher?.argv).not.toContain('-Command')
-    expect(decodeScript(launcher?.argv ?? [])).toContain('Start-Process -FilePath $env:BADTIME_EXE')
-    expect(decodeScript(launcher?.argv ?? [])).toContain('SetForegroundWindow')
+    expect(decodeScript(launcher?.argv ?? [])).toBe('. ([ScriptBlock]::Create($env:BADTIME_LAUNCHER))')
+    expect(launcher?.env?.BADTIME_LAUNCHER).toContain('Start-Process -FilePath $env:BADTIME_EXE')
+    expect(launcher?.env?.BADTIME_LAUNCHER).toContain('SetForegroundWindow')
     expect(launcher?.cwd).toBe(HOME.windows)
     expect(child.argv[0]).toBe(WIN_CHROME)
     expect(arg(child, '--app=')).toBe(URL_DEFAULT)
@@ -685,6 +686,18 @@ describe('windows', () => {
     await w.clock.advance(3_000)
     expect(w.live().length).toBe(1)
     expect(arg(w.live()[0], '--user-data-dir=')).toContain('slot-1')
+  })
+
+  test('if Claude goes away, a detached watchdog closes the game', async ($, on) => {
+    const w = makeWorld(on, 'windows')
+    await openGame($, w)
+    const launcher = w.spawns[0]?.env?.BADTIME_LAUNCHER ?? ''
+    const watchdog = w.spawns[0]?.env?.BADTIME_WATCHDOG ?? ''
+    expect(launcher).toContain('if ($claude -ne $null -and $claude.HasExited) { break }')
+    expect(launcher).toContain("Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -WindowStyle Hidden")
+    expect(watchdog).toContain('if ($launcher.HasExited) {')
+    expect(watchdog).toContain('[void]$browser.CloseMainWindow()')
+    expect(watchdog).toContain("taskkill.exe') /PID $browser.Id /T /F")
   })
 
   test('quitting Claude closes the browser too', async ($, on) => {

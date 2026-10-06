@@ -64,7 +64,7 @@ On a Mac, quit the game with ⌘Q or `/badtime close`: the red close button leav
 - **Its own browser profile.** The game runs in `~/.bad-time/profiles/slot-N`, with no logins, cookies or extensions, separate from your normal browser.
 - **Closes only its own windows.** A leftover window from a crashed session is found by that profile folder in its command line, never by a saved process id.
 - **Nothing from the repo runs.** Every helper is called by its absolute path, without a shell, from your home folder.
-- **On Windows** the browser is started by a small PowerShell launcher (`Start-Process`, as your own shell would), which also brings the game to the front. Every PowerShell script is sent encoded, and the browser path and arguments go in through environment variables, never spliced into the script.
+- **On Windows** the browser is started by a small PowerShell launcher (`Start-Process`, as your own shell would), which also brings the game to the front and draws the banners and countdown. A second, hidden PowerShell watchdog closes the game if Claude exits. Their scripts and the browser path go in through environment variables behind a short encoded command, never spliced into a command line.
 
 ### What it reaches
 
@@ -72,7 +72,7 @@ From `claude plugin validate`:
 
 | Network | Runs processes | Files | Calls a model | Submits prompts |
 | --- | --- | --- | --- | --- |
-| No (the browser loads the game page) | The browser; `ps` and `kill` on macOS and Linux (`kill -STOP`/`-CONT` freezes and resumes the game's own page process); `osascript` on macOS for the screen size, to bring the game back on your next prompt, and twice a second while the game is open to see which app is in front; `powershell` and `taskkill` on Windows (the launcher, the screen size, the chime, finding and closing leftover game windows); `paplay` or `aplay` on Linux for the chime | Checks that browser and helper paths exist; on Windows writes `~/.bad-time/control/slot-N.txt`, the switch the launcher reads (bring the game back, show a banner). The browser keeps its own profile in `~/.bad-time/profiles/` | No | No |
+| No (the browser loads the game page) | The browser; `ps` and `kill` on macOS and Linux (`kill -STOP`/`-CONT` freezes and resumes the game's own page process); `osascript` on macOS for the screen size, to bring the game back on your next prompt, and twice a second while the game is open to see which app is in front; `powershell` and `taskkill` on Windows (the launcher, the exit watchdog, the screen size, the chimes, finding and closing leftover game windows); `paplay` or `aplay` on Linux for the chime | Checks that browser and helper paths exist; on Windows writes `~/.bad-time/control/slot-N.txt`, the switch the launcher reads (bring the game back, show a banner). The browser keeps its own profile in `~/.bad-time/profiles/` | No | No |
 
 Environment variables read: `HOME`, `PATH`, `OS`, `USERPROFILE`, `SystemRoot`, `ProgramFiles`, `ProgramFiles(x86)`, `LOCALAPPDATA`.
 
