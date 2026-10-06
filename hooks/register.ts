@@ -51,8 +51,13 @@ type Win = {
   hidden: boolean
   control?: string
   seq: number
-  held?: number[]
-  holdWatch?: Timer
+  focus?: Timer
+  focusBusy?: boolean
+  frozen?: number[]
+  wasFront?: boolean
+  resumeAt?: number
+  hideOnLeave?: boolean
+  appHidden?: boolean
   heartbeat?: Timer
 }
 
@@ -213,7 +218,7 @@ const WINDOWS_LAUNCHER = [
   '  [System.Windows.Forms.Application]::DoEvents()',
   '}',
   "try { Show-Game } catch { [Console]::Error.WriteLine('bad-time-front ' + $_) }",
-  '$hold = $false',
+  '$hideOnLeave = $false',
   '$wasFront = $true',
   '$resumeAt = $null',
   '$grace = 0',
@@ -223,19 +228,20 @@ const WINDOWS_LAUNCHER = [
   '  $now = Read-Control',
   '  if ($now -ne $null -and $now -ne $last) {',
   '    $last = $now',
-  "    try { if ($now.StartsWith('show')) { Show-Game } elseif ($now.StartsWith('hide')) { Hide-Game } elseif ($now.StartsWith('hold')) { $hold = $true } } catch { [Console]::Error.WriteLine('bad-time-control ' + $_) }",
+  "    try { if ($now.StartsWith('show')) { $hideOnLeave = $false; Show-Game } elseif ($now.StartsWith('leave')) { $hideOnLeave = $true } } catch { [Console]::Error.WriteLine('bad-time-control ' + $_) }",
   "    [Console]::Out.WriteLine('bad-time-did ' + $now)",
   '    [Console]::Out.Flush()',
   '  }',
   '  try {',
   '    if ($ready -and $script:h -ne [IntPtr]::Zero) {',
   '      $isFront = [BadTime.Win]::GetForegroundWindow() -eq $script:h',
-  '      if ($isFront -and -not $wasFront) { $hold = $false; $resumeAt = (Get-Date).AddMilliseconds($grace) }',
+  '      if ($isFront -and -not $wasFront) { $resumeAt = (Get-Date).AddMilliseconds($grace) }',
   '      if (-not $isFront) { $resumeAt = $null }',
   '      $wasFront = $isFront',
+  '      if ($hideOnLeave -and -not $isFront) { $hideOnLeave = $false; Hide-Game }',
   '      $waiting = $resumeAt -ne $null -and (Get-Date) -lt $resumeAt',
-  '      if ($hold -or -not $isFront -or $waiting) { Freeze-Game } else { $resumeAt = $null; Thaw-Game }',
-  '      if ($waiting -and -not $hold) { Show-Countdown (($resumeAt - (Get-Date)).TotalMilliseconds) } else { Hide-Countdown }',
+  '      if (-not $isFront -or $waiting) { Freeze-Game } else { $resumeAt = $null; Thaw-Game }',
+  '      if ($waiting) { Show-Countdown (($resumeAt - (Get-Date)).TotalMilliseconds) } else { Hide-Countdown }',
   '    }',
   "  } catch { [Console]::Error.WriteLine('bad-time-freeze ' + $_) }",
   '}',
@@ -397,6 +403,8 @@ export const register: Register = (on, options) => {
           w.closing = true
           w.heartbeat?.cancel()
           if (w.pid !== undefined) void endWindowsBrowser($, w.pid)
+          w.focus?.cancel()
+          void endMacFreeze($, w)
           stopStream(w)
           void releaseSlot($, w.slot)
         }
@@ -461,7 +469,7 @@ async function statusText($: Api): Promise<string> {
   const state = enabled ? 'on' : 'off'
   const mode =
     cfg.mode === 'pause'
-      ? `pauses ${seconds(cfg.countdownMs)} after Claude finishes and comes back on your next prompt`
+      ? 'goes to the background once you leave it after Claude finishes, and comes back on your next prompt'
       : cfg.mode === 'close'
         ? `closes ${seconds(cfg.countdownMs)} after Claude finishes`
         : 'stays open between prompts'
@@ -496,8 +504,10 @@ async function pauseWindow($: Api): Promise<void> {
     return
   }
   w.hidden = true
-  closedAt = await $.clock.now()
-  if (w.held !== undefined) await releaseHold($, w)
+  if (sys.os === 'mac') {
+    w.hideOnLeave = true
+    return
+  }
   if (!(await setShown($, sys, w, false))) await closeWindow($, true)
 }
 
@@ -507,6 +517,11 @@ async function resumeWindow($: Api): Promise<void> {
   const sys = await system($)
   if (sys === undefined) return
   w.hidden = false
+  if (sys.os === 'mac') {
+    w.hideOnLeave = false
+    if (w.appHidden !== true) return
+    w.appHidden = false
+  }
   if (!(await setShown($, sys, w, true))) {
     await closeWindow($, false)
     for (let i = 0; i < 16 && win !== undefined; i += 1) await pause($, 250)
@@ -520,7 +535,7 @@ async function setShown($: Api, sys: Sys, w: Win, shown: boolean): Promise<boole
     if (sys.os === 'windows') {
       if (w.control === undefined) return false
       w.seq += 1
-      await $.fs.write(w.control, `${verb} ${w.seq}`)
+      await $.fs.write(w.control, `${shown ? 'show' : 'leave'} ${w.seq}`)
       return true
     }
     if (sys.os === 'mac' && sys.osascript !== undefined) {
@@ -605,6 +620,7 @@ async function startWindow($: Api): Promise<void> {
   }
   win = w
   w.heartbeat = $.clock.every(HEARTBEAT_MS, () => void beat($, slot))
+  watchFocus($, sys, w)
   void watch($, w)
 }
 
@@ -649,6 +665,8 @@ async function closeWindow($: Api, byMod: boolean): Promise<void> {
   if (sys?.os === 'windows') {
     if (w.pid !== undefined) void windowsClose($, sys, w.pid, false)
   } else {
+    w.focus?.cancel()
+    if (sys?.os === 'mac') await thawPage($, sys, w)
     stopStream(w)
   }
   $.clock.after(CLOSE_GRACE_MS, () => {
@@ -993,69 +1011,81 @@ async function readScreen($: Api, sys: Sys): Promise<{ w: number; h: number } | 
 
 async function needsYou($: Api): Promise<void> {
   try {
-    $.ui.toast(`Claude needs you: the fight is frozen. Answer in the terminal, then click the game; it resumes ${seconds(cfg.resumeMs)} later.`, { timeoutMs: 8_000 })
+    $.ui.toast('Claude needs you. Finish this attack, then switch to the terminal: the fight freezes while you are away.', { timeoutMs: 8_000 })
   } catch {}
-  void holdGame($)
   await chime($)
 }
 
-async function holdGame($: Api): Promise<void> {
+function watchFocus($: Api, sys: Sys, w: Win): void {
+  if (sys.os !== 'mac' || sys.osascript === undefined || sys.kill === undefined) return
+  w.wasFront = true
+  w.focus = $.clock.every(500, () => {
+    if (w.focusBusy === true) return
+    w.focusBusy = true
+    void focusTick($, sys, w).finally(() => {
+      w.focusBusy = false
+    })
+  })
+}
+
+async function focusTick($: Api, sys: Sys, w: Win): Promise<void> {
   try {
-    const w = win
-    if (w === undefined || w.closing || w.hidden || w.held !== undefined) return
-    const sys = await system($)
-    if (sys === undefined) return
-    if (sys.os === 'windows') {
-      if (w.control === undefined) return
-      w.seq += 1
-      await $.fs.write(w.control, `hold ${w.seq}`)
+    if (w.ended || w.closing) {
+      w.focus?.cancel()
       return
     }
-    if (sys.os !== 'mac' || sys.kill === undefined || sys.osascript === undefined) return
+    if (w.appHidden === true) {
+      await freezePage($, sys, w)
+      return
+    }
     const main = w.pid ?? (await mainPid($, sys, w.slot))
-    const renderers = await rendererPids($, sys, w.slot)
-    if (main === undefined || renderers.length === 0) return
+    if (main === undefined) return
     w.pid = main
-    await $.process.run([sys.kill, '-STOP', ...renderers.map(String)], { cwd: sys.home })
-    w.held = renderers
-    let left = false
-    let backSince: number | undefined
-    w.holdWatch = $.clock.every(500, () => {
-      void (async () => {
-        if (w.held === undefined || w.ended || w.closing) {
-          w.holdWatch?.cancel()
-          return
-        }
-        const front = await frontPid($, sys)
-        if (front === undefined) return
-        if (front !== main) {
-          left = true
-          backSince = undefined
-          return
-        }
-        if (!left) return
-        const now = await $.clock.now()
-        backSince ??= now
-        if (now - backSince >= cfg.resumeMs) await releaseHold($, w)
-      })()
-    })
+    const front = await frontPid($, sys)
+    if (front === undefined) return
+    const isFront = front === main
+    const now = await $.clock.now()
+    if (isFront && w.wasFront === false) w.resumeAt = now + cfg.resumeMs
+    if (!isFront) w.resumeAt = undefined
+    w.wasFront = isFront
+    if (w.hideOnLeave === true && !isFront) {
+      w.hideOnLeave = false
+      await freezePage($, sys, w)
+      if (await setShown($, sys, w, false)) w.appHidden = true
+      return
+    }
+    const waiting = w.resumeAt !== undefined && now < w.resumeAt
+    if (!isFront || waiting) {
+      await freezePage($, sys, w)
+    } else {
+      w.resumeAt = undefined
+      await thawPage($, sys, w)
+    }
   } catch (err) {
-    debug($, `hold: ${describe(err)}`)
+    debug($, `focus: ${describe(err)}`)
   }
 }
 
-async function releaseHold($: Api, w: Win): Promise<void> {
-  const held = w.held
-  w.held = undefined
-  w.holdWatch?.cancel()
-  w.holdWatch = undefined
-  if (held === undefined) return
+async function freezePage($: Api, sys: Sys, w: Win): Promise<void> {
+  if (w.frozen !== undefined || sys.kill === undefined) return
+  const pids = await rendererPids($, sys, w.slot)
+  if (pids.length === 0) return
+  await $.process.run([sys.kill, '-STOP', ...pids.map(String)], { cwd: sys.home })
+  w.frozen = pids
+}
+
+async function thawPage($: Api, sys: Sys, w: Win): Promise<void> {
+  const pids = w.frozen
+  if (pids === undefined || sys.kill === undefined) return
+  w.frozen = undefined
+  await $.process.run([sys.kill, '-CONT', ...pids.map(String)], { cwd: sys.home })
+}
+
+async function endMacFreeze($: Api, w: Win): Promise<void> {
   try {
     const sys = await system($)
-    if (sys?.kill !== undefined) await $.process.run([sys.kill, '-CONT', ...held.map(String)], { cwd: sys.home })
-  } catch (err) {
-    debug($, `release: ${describe(err)}`)
-  }
+    if (sys?.os === 'mac') await thawPage($, sys, w)
+  } catch {}
 }
 
 async function frontPid($: Api, sys: Sys): Promise<number | undefined> {

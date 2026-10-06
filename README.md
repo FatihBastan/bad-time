@@ -7,9 +7,9 @@ A Claude Code mod that opens **Bad Time Simulator** in its own window while Clau
 ## What it does
 
 - Once Claude has been working for 2 seconds, a centered game window opens: about 60% of your screen height, in the game's 4:3 shape, and resizable.
-- **When Claude answers**, you hear a short chime and 3 seconds later the window goes to the background. The game pauses there, and your next prompt brings the same fight back. Quitting the session closes it.
-- **When Claude needs you** (a permission prompt or a question), you hear the same chime and the fight freezes where it stands. Your keyboard focus doesn't move, so game keys can't answer Claude's prompt by accident. Answer in the terminal, then click the game; a 3-2-1 countdown appears over it and the fight carries on 2.5 seconds later (the countdown is Windows-only for now). The mod never answers or changes anything for Claude.
-- **On Windows the fight runs only while the game window is in front**: click away and it freezes, click back and it continues after the same countdown.
+- **When Claude answers**, you hear a short chime. Finish the attack; once you leave the game window it goes to the background with the fight paused, and your next prompt brings the same fight back. Quitting the session closes it.
+- **When Claude needs you** (a permission prompt or a question), you hear the same chime. Finish the attack (the FIGHT/ACT/ITEM/MERCY menu waits for you), then switch to the terminal and answer. The mod never moves your keyboard focus and never answers or changes anything for Claude.
+- **The fight runs only while the game window is in front**: click away and it freezes; click back and it carries on 2.5 seconds later, with a 3-2-1 countdown over the game on Windows.
 - Close the window yourself any time; your next prompt starts a new fight.
 - Up to 4 Claude sessions can each have their own window.
 
@@ -46,7 +46,7 @@ Change these in `/config` or with `/plugin configure bad-time@bad-time`.
 | --- | --- | --- |
 | `onFinish` | `pause` | `pause` sends the window to the background and continues the fight on your next prompt (closes instead on Linux); `close` starts a fresh fight every prompt; `keep` leaves it on screen |
 | `delaySeconds` | 2 | 0 to 30; shorter turns never open the window |
-| `countdownSeconds` | 3 | 0 to 10; seconds between the chime and the window pausing or closing |
+| `countdownSeconds` | 3 | 0 to 10; seconds after the chime before the window goes to the background (once you've left it) or closes |
 | `resumeDelaySeconds` | 2.5 | 0 to 10; how long the fight stays frozen after you click back into the game |
 | `sounds` | on | The short chime when Claude needs you or finishes |
 | `strayKeyGuard` | on | Holds a prompt sent within 1.5 s of the mod closing the window and puts it back in the box |
@@ -72,7 +72,7 @@ From `claude plugin validate`:
 
 | Network | Runs processes | Files | Calls a model | Submits prompts |
 | --- | --- | --- | --- | --- |
-| No (the browser loads the game page) | The browser; `ps` and `kill` on macOS and Linux (`kill -STOP`/`-CONT` freezes and resumes the game's own page process); `osascript` on macOS for the screen size, to hide and show the game, and to see which app is in front; `powershell` and `taskkill` on Windows (the launcher, the screen size, the chime, finding and closing leftover game windows); `paplay` or `aplay` on Linux for the chime | Checks that browser and helper paths exist; on Windows writes `~/.bad-time/control/slot-N.txt`, the show/hide/hold switch the launcher reads. The browser keeps its own profile in `~/.bad-time/profiles/` | No | No |
+| No (the browser loads the game page) | The browser; `ps` and `kill` on macOS and Linux (`kill -STOP`/`-CONT` freezes and resumes the game's own page process); `osascript` on macOS for the screen size, to hide and show the game, and twice a second while the game is on screen to see which app is in front; `powershell` and `taskkill` on Windows (the launcher, the screen size, the chime, finding and closing leftover game windows); `paplay` or `aplay` on Linux for the chime | Checks that browser and helper paths exist; on Windows writes `~/.bad-time/control/slot-N.txt`, the show/leave switch the launcher reads. The browser keeps its own profile in `~/.bad-time/profiles/` | No | No |
 
 Environment variables read: `HOME`, `PATH`, `OS`, `USERPROFILE`, `SystemRoot`, `ProgramFiles`, `ProgramFiles(x86)`, `LOCALAPPDATA`.
 

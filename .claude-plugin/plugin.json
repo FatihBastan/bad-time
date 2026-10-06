@@ -1,6 +1,6 @@
 {
   "name": "bad-time",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Opens Bad Time Simulator (a fan game by Jcw87, recreating the Sans fight from UNDERTALE by Toby Fox) in its own window while Claude works. Not affiliated with either.",
   "author": {
     "name": "Fatih Baştan",
@@ -18,7 +18,7 @@
     "onFinish": {
       "type": "string",
       "title": "When Claude finishes",
-      "description": "pause: the window goes to the background after Claude answers and the fight continues on your next prompt. close: a fresh fight every prompt. keep: always on screen.",
+      "description": "pause: after Claude answers, the window goes to the background once you leave it, and the fight continues on your next prompt. close: a fresh fight every prompt. keep: always on screen.",
       "options": [
         "pause",
         "close",
@@ -37,7 +37,7 @@
     "countdownSeconds": {
       "type": "number",
       "title": "Countdown before closing",
-      "description": "Seconds between the chime and the window pausing or closing after Claude answers.",
+      "description": "Seconds after the chime before the window goes to the background (once you have left it) or closes.",
       "default": 3,
       "min": 0,
       "max": 10

@@ -14,8 +14,9 @@ type World = {
   spawns: { argv: readonly string[]; cwd?: string; env?: Readonly<Record<string, string>> }[]
   runs: { argv: readonly string[]; cwd?: string; script?: string; killed?: readonly string[] }[]
   files: Map<string, string>
-  // macOS: the pid of the frontmost app, as NSWorkspace reports it.
-  front: number
+  // macOS: the frontmost app, as NSWorkspace reports it; 'game' is the
+  // newest live game window, any number another app.
+  front: number | 'game'
   toasts: string[]
   chimes: number
   fills: string[]
@@ -53,7 +54,7 @@ function makeWorld(on: On, os: Os = 'mac', setup: Setup = {}): World {
     spawns: [],
     runs: [],
     files: new Map(),
-    front: 1,
+    front: 'game',
     toasts: [],
     chimes: 0,
     fills: [],
@@ -150,7 +151,9 @@ function makeWorld(on: On, os: Os = 'mac', setup: Setup = {}): World {
       for (const c of world.children) if (pids.includes(c.pid)) c.exit()
       return ok()
     }
-    if (bin === '/usr/bin/osascript' && e.argv.some(a => a.includes('frontmostApplication'))) return ok(`${world.front}\n`)
+    if (bin === '/usr/bin/osascript' && e.argv.some(a => a.includes('frontmostApplication'))) {
+      return ok(`${world.front === 'game' ? (world.live().at(-1)?.pid ?? 1) : world.front}\n`)
+    }
     if (bin === '/usr/bin/osascript') return ok('1512x982\n')
     if (bin.endsWith('powershell.exe') && last.includes('PrimaryScreen')) return ok('1920x1040\r\n')
     if (bin.endsWith('powershell.exe') || bin === '/usr/bin/paplay') world.chimes += 1
@@ -251,12 +254,15 @@ describe('opening', () => {
     expect(w.children.length).toBe(1)
   })
 
-  test('pause (default): after Claude answers the window goes to the background, and the next prompt brings the same fight back', async ($, on) => {
+  test('pause (default): after Claude answers the window waits until you leave it, then goes to the background; the next prompt brings the same fight back', async ($, on) => {
     const w = makeWorld(on)
     const game = await openGame($, w)
     await $.turn.complete(done('t1'))
-    await w.clock.advance(5_000)
+    await w.clock.advance(10_000)
     const macCalls = () => w.runs.filter(r => r.argv[0] === '/usr/bin/osascript' && r.argv.includes('JavaScript') && r.argv.length === 7)
+    expect(macCalls().length).toBe(0)
+    w.front = 999
+    await w.clock.advance(1_000)
     expect(macCalls().map(r => r.argv.slice(5))).toEqual([['hide', String(game.pid)]])
     expect(game.alive).toBe(true)
     await $.turn.start({ text: 'next', turnId: 't2' })
@@ -392,22 +398,19 @@ describe('hands off Claude', () => {
     expect(child.alive).toBe(true)
   })
 
-  test('macOS: when Claude needs you the fight freezes, and thaws only after you leave the game and come back', async ($, on) => {
+  test('macOS: a question only chimes; the fight runs while you stay in the game, freezes when you leave, and resumes after the grace', async ($, on) => {
     const w = makeWorld(on)
     const game = await openGame($, w)
-    w.front = game.pid
-    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' } })
-    await w.clock.advance(100)
     const signals = () => w.runs.filter(r => r.argv[0] === '/bin/kill').map(r => r.argv.slice(1).join(' '))
-    expect(signals()).toEqual([`-STOP ${game.pid + 10_000}`])
+    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' } })
     await w.clock.advance(2_000)
-    expect(signals()).toEqual([`-STOP ${game.pid + 10_000}`])
+    expect(w.chimes).toBe(1)
+    expect(signals()).toEqual([])
     w.front = 999
     await w.clock.advance(1_000)
-    expect(signals().length).toBe(1)
-    w.front = game.pid
+    expect(signals()).toEqual([`-STOP ${game.pid + 10_000}`])
+    w.front = 'game'
     await w.clock.advance(1_500)
-    // Back in the game, but the grace (2.5 s by default) has not run out.
     expect(signals().length).toBe(1)
     await w.clock.advance(2_000)
     expect(signals()).toEqual([`-STOP ${game.pid + 10_000}`, `-CONT ${game.pid + 10_000}`])
@@ -416,17 +419,14 @@ describe('hands off Claude', () => {
 
   test('macOS: leaving again during the grace restarts it', { options: { resumeDelaySeconds: 2 } }, async ($, on) => {
     const w = makeWorld(on)
-    const game = await openGame($, w)
-    w.front = game.pid
-    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' } })
-    await w.clock.advance(100)
+    await openGame($, w)
     w.front = 999
     await w.clock.advance(1_000)
-    w.front = game.pid
+    w.front = 'game'
     await w.clock.advance(1_000)
     w.front = 999
     await w.clock.advance(1_000)
-    w.front = game.pid
+    w.front = 'game'
     await w.clock.advance(1_000)
     const conts = () => w.runs.filter(r => r.argv[0] === '/bin/kill' && r.argv[1] === '-CONT')
     expect(conts().length).toBe(0)
@@ -434,20 +434,22 @@ describe('hands off Claude', () => {
     expect(conts().length).toBe(1)
   })
 
-  test('Windows: when Claude needs you the launcher is told to hold the fight', async ($, on) => {
+  test('Windows: a question only chimes; the launcher freezes the fight when you leave and counts down when you return', async ($, on) => {
     const w = makeWorld(on, 'windows')
     const game = await openGame($, w)
     expect(game.argv).toContain('--disable-hang-monitor')
     const script = decodeScript(w.spawns[0]?.argv ?? []) ?? ''
     expect(script).toContain('NtSuspendProcess')
-    expect(script).toContain('if ($hold -or -not $isFront -or $waiting) { Freeze-Game } else { $resumeAt = $null; Thaw-Game }')
-    expect(w.spawns[0]?.env?.BADTIME_RESUME_MS).toBe('2500')
+    expect(script).toContain('if (-not $isFront -or $waiting) { Freeze-Game } else { $resumeAt = $null; Thaw-Game }')
+    expect(script).toContain('if ($hideOnLeave -and -not $isFront) { $hideOnLeave = $false; Hide-Game }')
+    expect(script).toContain('if ($waiting) { Show-Countdown (($resumeAt - (Get-Date)).TotalMilliseconds) } else { Hide-Countdown }')
     expect(script).toContain('New-Object BadTime.Countdown')
     expect(script).toContain('protected override bool ShowWithoutActivation { get { return true; } }')
-    expect(script).toContain('if ($waiting -and -not $hold) { Show-Countdown (($resumeAt - (Get-Date)).TotalMilliseconds) } else { Hide-Countdown }')
+    expect(w.spawns[0]?.env?.BADTIME_RESUME_MS).toBe('2500')
     await $.tool.call({ tool: 'AskUserQuestion', questions: [] } as never)
     await w.clock.advance(100)
-    expect([...w.files.values()].at(-1)).toBe('hold 1')
+    expect(w.chimes).toBe(1)
+    expect([...w.files.values()].at(-1)).toBe('show 0')
     expect(game.alive).toBe(true)
   })
 
@@ -635,7 +637,7 @@ describe('windows', () => {
     for (const r of w.runs) expect(/^[A-Z]:\\/.test(r.argv[0] ?? '')).toBe(true)
   })
 
-  test('pause (default): the launcher is told to minimize, and to restore on the next prompt', async ($, on) => {
+  test('pause (default): the launcher is told to minimize once you leave the game, and to restore on the next prompt', async ($, on) => {
     const w = makeWorld(on, 'windows')
     const game = await openGame($, w)
     expect(w.spawns[0]?.env?.BADTIME_CONTROL).toBe('C:\\Users\\Fatih Baştan\\.bad-time\\control\\slot-1.txt')
@@ -643,7 +645,7 @@ describe('windows', () => {
     await $.turn.complete(done('t1'))
     await w.clock.advance(5_000)
     const control = () => [...w.files.values()].at(-1)
-    expect(control()).toBe('hide 1')
+    expect(control()).toBe('leave 1')
     expect(game.alive).toBe(true)
     await $.turn.start({ text: 'next', turnId: 't2' })
     await w.clock.advance(3_000)
