@@ -12,7 +12,7 @@ type Child = { pid: number; argv: readonly string[]; cwd?: string; alive: boolea
 type World = {
   children: Child[]
   spawns: { argv: readonly string[]; cwd?: string; env?: Readonly<Record<string, string>> }[]
-  runs: { argv: readonly string[]; cwd?: string; script?: string; killed?: readonly string[] }[]
+  runs: { argv: readonly string[]; cwd?: string; env?: Readonly<Record<string, string>> }[]
   files: Map<string, string>
   // macOS: the frontmost app, as NSWorkspace reports it; 'game' is the
   // newest live game window, any number another app.
@@ -114,11 +114,11 @@ function makeWorld(on: On, os: Os = 'mac', setup: Setup = {}): World {
   on('process.spawn', async function* (_$, e, next): AsyncGenerator<ProcessSpawnChunk, { value: ProcessSpawnResult }> {
     world.spawns.push({ argv: e.argv, cwd: e.cwd, env: e.env })
     const stopped = new Promise<void>(resolve => next.signal.addEventListener('abort', () => resolve()))
-    const script = (e.argv[0] ?? '').endsWith('powershell.exe') ? (e.env?.BADTIME_LAUNCHER ?? decodeScript(e.argv)) : undefined
+    const script = (e.argv[0] ?? '').endsWith('powershell.exe') ? scriptName(e.argv) : undefined
     if (script !== undefined) {
       // The Windows launcher: Start-Process detaches the browser, so ending
       // the launcher leaves the browser running, as on a real PC.
-      if (!script.includes('Start-Process')) return { value: { code: 1, signal: null } }
+      if (script !== 'windows-launcher.ps1') return { value: { code: 1, signal: null } }
       const exe = e.env?.BADTIME_EXE ?? ''
       const { child, exited } = startBrowser([exe, ...splitWindowsArgs(e.env?.BADTIME_ARGS ?? '')], e.cwd)
       yield { stream: 'stdout', text: `bad-time-pid ${child.pid}\r\n` }
@@ -135,10 +135,10 @@ function makeWorld(on: On, os: Os = 'mac', setup: Setup = {}): World {
   })
   on('process.run', async (_$, e) => {
     const bin = e.argv[0] ?? ''
-    const last = bin.endsWith('powershell.exe') ? (decodeScript(e.argv) ?? '') : (e.argv.at(-1) ?? '')
-    world.runs.push({ argv: e.argv, cwd: e.init?.cwd, script: bin.endsWith('powershell.exe') ? last : undefined })
+    const name = scriptName(e.argv) ?? ''
+    world.runs.push({ argv: e.argv, cwd: e.init?.cwd, env: e.init?.env })
     const ok = (stdout = '') => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
-    if (bin === '/bin/ps' || (bin.endsWith('powershell.exe') && last.includes('Win32_Process'))) {
+    if (bin === '/bin/ps' || name === 'windows-processes.ps1') {
       const quote = (a: string) => (a.includes(' ') ? `"${a}"` : a)
       const rows = world.live().flatMap(c => {
         const own = `${c.pid} ${c.argv.map(quote).join(' ')}`
@@ -154,12 +154,12 @@ function makeWorld(on: On, os: Os = 'mac', setup: Setup = {}): World {
       for (const c of world.children) if (pids.includes(c.pid)) c.exit()
       return ok()
     }
-    if (bin === '/usr/bin/osascript' && e.argv.some(a => a.includes('frontmostApplication'))) {
+    if (name === 'mac-front.js') {
       return ok(`${world.front === 'game' ? (world.live().at(-1)?.pid ?? 1) : world.front}\n`)
     }
-    if (bin === '/usr/bin/osascript') return ok('1512x982\n')
-    if (bin.endsWith('powershell.exe') && last.includes('PrimaryScreen')) return ok('1920x1040\r\n')
-    if (bin.endsWith('powershell.exe') || bin === '/usr/bin/paplay') world.chimes += 1
+    if (name === 'mac-screen.js') return ok('1512x982\n')
+    if (name === 'windows-screen.ps1') return ok('1920x1040\r\n')
+    if (name === 'windows-chime.ps1' || bin === '/usr/bin/paplay') world.chimes += 1
     return ok()
   })
   // The bottoms of the events the plugin passes on: they stand for the engine.
@@ -184,22 +184,10 @@ function badtime(args: string) {
   return { command: 'badtime', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as const
 }
 
-// PowerShell scripts arrive as -EncodedCommand: base64 of UTF-16LE.
-function decodeScript(argv: readonly string[]): string | undefined {
-  const at = argv.indexOf('-EncodedCommand')
-  const encoded = at < 0 ? undefined : argv[at + 1]
-  if (encoded === undefined) return undefined
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-  const bytes: number[] = []
-  const clean = encoded.replace(/=+$/, '')
-  for (let i = 0; i < clean.length; i += 4) {
-    const n = [0, 1, 2, 3].reduce((acc, k) => (acc << 6) | Math.max(0, alphabet.indexOf(clean.charAt(i + k))), 0)
-    const count = Math.min(3, Math.floor(((clean.length - i) * 6) / 8))
-    for (let k = 0; k < count; k += 1) bytes.push((n >> (16 - 8 * k)) & 0xff)
-  }
-  let text = ''
-  for (let i = 0; i + 1 < bytes.length; i += 2) text += String.fromCharCode((bytes[i] ?? 0) | ((bytes[i + 1] ?? 0) << 8))
-  return text
+// The helper script a command runs, by file name (scripts/<name>).
+function scriptName(argv: readonly string[]): string | undefined {
+  const file = argv.find(a => /[\\/]scripts[\\/][a-z-]+\.(ps1|js)$/.test(a))
+  return file === undefined ? undefined : file.slice(Math.max(file.lastIndexOf('/'), file.lastIndexOf('\\')) + 1)
 }
 
 // How Windows splits a command line into arguments (no escaped quotes here).
@@ -262,7 +250,7 @@ describe('opening', () => {
     const game = await openGame($, w)
     await $.turn.complete(done('t1'))
     await w.clock.advance(10_000)
-    const bringBack = () => w.runs.filter(r => r.argv[0] === '/usr/bin/osascript' && r.argv.some(a => a.includes('activateWithOptions')))
+    const bringBack = () => w.runs.filter(r => scriptName(r.argv) === 'mac-show.js')
     expect(bringBack().length).toBe(0)
     expect(game.alive).toBe(true)
     expect(w.sounds).toEqual(['sounds/done.wav'])
@@ -440,18 +428,6 @@ describe('hands off Claude', () => {
     const w = makeWorld(on, 'windows')
     const game = await openGame($, w)
     expect(game.argv).toContain('--disable-hang-monitor')
-    const script = w.spawns[0]?.env?.BADTIME_LAUNCHER ?? ''
-    expect(script).toContain('NtSuspendProcess')
-    expect(script).toContain('if (-not $isFront -or $waiting) { Freeze-Game } else { $resumeAt = $null; Thaw-Game }')
-    expect(script).toContain("elseif ($now.StartsWith('ask')) { $banner = 'ask'; Flash-Claude } elseif ($now.StartsWith('done')) { $banner = 'done' }")
-    expect(script).toContain("if ($banner -ne $null) { Show-Banner ($banner -eq 'ask') } else { Hide-Banner }")
-    expect(script).toContain('if (-not $isFront) { $resumeAt = $null; $banner = $null }')
-    expect(script).toContain('"CLAUDE NEEDS YOU"')
-    expect(script).toContain('"CLAUDE IS DONE"')
-    expect(script.split('SetLayeredWindowAttributes(Handle, 0, 235, 2);').length - 1).toBe(2)
-    expect(script).toContain('if ($waiting) { Show-Countdown (($resumeAt - (Get-Date)).TotalMilliseconds) } else { Hide-Countdown }')
-    expect(script).toContain('New-Object BadTime.Countdown')
-    expect(script).toContain('protected override bool ShowWithoutActivation { get { return true; } }')
     expect(w.spawns[0]?.env?.BADTIME_RESUME_MS).toBe('2500')
     await $.tool.call({ tool: 'AskUserQuestion', questions: [] } as never)
     await w.clock.advance(100)
@@ -601,6 +577,33 @@ describe('commands and config', () => {
     expect(arg(child, '--window-position=')).toBe('256,141')
   })
 
+  test('mac: no helper ever runs an inline or encoded program', async ($, on) => {
+    const w = makeWorld(on, 'mac')
+    await openGame($, w)
+    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' } })
+    await $.turn.complete(done('t1'))
+    await $.turn.start({ text: 'next', turnId: 't2' })
+    await w.clock.advance(4_000)
+    expect(w.runs.length).toBeGreaterThan(2)
+    for (const r of [...w.runs, ...w.spawns]) {
+      for (const flag of ['-e', '-c', '-Command', '-EncodedCommand']) expect(r.argv).not.toContain(flag)
+    }
+  })
+
+  test('windows: no helper ever runs an inline or encoded program', async ($, on) => {
+    const w = makeWorld(on, 'windows')
+    await openGame($, w)
+    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' } })
+    await $.turn.complete(done('t1'))
+    await $.turn.start({ text: 'next', turnId: 't2' })
+    await w.clock.advance(4_000)
+    expect(w.runs.length).toBeGreaterThan(2)
+    for (const r of [...w.runs, ...w.spawns]) {
+      for (const flag of ['-e', '-c', '-Command', '-EncodedCommand']) expect(r.argv).not.toContain(flag)
+    }
+  })
+
+
   test('every helper is an absolute path, run from the home folder', async ($, on) => {
     const w = makeWorld(on)
     await openGame($, w)
@@ -631,11 +634,11 @@ describe('windows', () => {
     const child = await openGame($, w)
     const launcher = w.spawns[0]
     expect(launcher?.argv[0]).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
-    expect(launcher?.argv).toContain('-EncodedCommand')
+    expect(launcher?.argv.slice(1, 6)).toEqual(['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File'])
+    expect(scriptName(launcher?.argv ?? [])).toBe('windows-launcher.ps1')
+    expect(launcher?.argv).not.toContain('-EncodedCommand')
     expect(launcher?.argv).not.toContain('-Command')
-    expect(decodeScript(launcher?.argv ?? [])).toBe('. ([ScriptBlock]::Create($env:BADTIME_LAUNCHER))')
-    expect(launcher?.env?.BADTIME_LAUNCHER).toContain('Start-Process -FilePath $env:BADTIME_EXE')
-    expect(launcher?.env?.BADTIME_LAUNCHER).toContain('SetForegroundWindow')
+    expect(launcher?.env?.BADTIME_EXE).toBe(WIN_CHROME)
     expect(launcher?.cwd).toBe(HOME.windows)
     expect(child.argv[0]).toBe(WIN_CHROME)
     expect(arg(child, '--app=')).toBe(URL_DEFAULT)
@@ -688,18 +691,6 @@ describe('windows', () => {
     expect(arg(w.live()[0], '--user-data-dir=')).toContain('slot-1')
   })
 
-  test('if Claude goes away, a detached watchdog closes the game', async ($, on) => {
-    const w = makeWorld(on, 'windows')
-    await openGame($, w)
-    const launcher = w.spawns[0]?.env?.BADTIME_LAUNCHER ?? ''
-    const watchdog = w.spawns[0]?.env?.BADTIME_WATCHDOG ?? ''
-    expect(launcher).toContain('if ($claude -ne $null -and $claude.HasExited) { break }')
-    expect(launcher).toContain("Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -WindowStyle Hidden")
-    expect(watchdog).toContain('if ($launcher.HasExited) {')
-    expect(watchdog).toContain('[void]$browser.CloseMainWindow()')
-    expect(watchdog).toContain("taskkill.exe') /PID $browser.Id /T /F")
-  })
-
   test('quitting Claude closes the browser too', async ($, on) => {
     const w = makeWorld(on, 'windows')
     const child = await openGame($, w)
@@ -708,13 +699,14 @@ describe('windows', () => {
     expect(child.alive).toBe(false)
   })
 
-  test('the chime plays through PowerShell with the sound path passed outside the script', async ($, on) => {
+  test('the chime plays through the chime script, with the sound path in the environment', async ($, on) => {
     const w = makeWorld(on, 'windows')
     await openGame($, w)
     await $.turn.complete(done('t1'))
     await w.clock.advance(100)
-    const sound = w.runs.find(r => r.script?.includes('SoundPlayer'))
-    expect(sound?.script).toBe('(New-Object System.Media.SoundPlayer $env:BADTIME_SOUND).PlaySync()')
+    const sound = w.runs.find(r => scriptName(r.argv) === 'windows-chime.ps1')
+    expect(sound?.argv).toContain('-File')
+    expect(sound?.env?.BADTIME_SOUND?.endsWith('done.wav')).toBe(true)
   })
 
   test('a leftover Windows window is found by its profile and closed with taskkill', async ($, on) => {

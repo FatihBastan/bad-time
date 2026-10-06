@@ -60,21 +60,54 @@ On a Mac, quit the game with ⌘Q or `/badtime close`: the red close button leav
 
 ## Safety
 
-- **Hands off Claude.** Every hook passes Claude's events on untouched. The only thing the mod ever holds back is your own prompt, typed within 1.5 s of the mod closing the window (turn it off with `strayKeyGuard`). If the mod fails, Claude carries on as if it were not installed.
+- **Hands off Claude.** Every hook passes Claude's events on untouched, and the mod never answers, changes or decides a permission prompt or a question. The only thing it ever holds back is your own prompt, typed within 1.5 s of the mod closing the game window (turn it off with `strayKeyGuard`). If the mod fails, Claude carries on as if it were not installed.
 - **Its own browser profile.** The game runs in `~/.bad-time/profiles/slot-N`, with no logins, cookies or extensions, separate from your normal browser.
-- **Closes only its own windows.** A leftover window from a crashed session is found by that profile folder in its command line, never by a saved process id.
-- **Nothing from the repo runs.** Every helper is called by its absolute path, without a shell, from your home folder.
-- **On Windows** the browser is started by a small PowerShell launcher (`Start-Process`, as your own shell would), which also brings the game to the front and draws the banners and countdown. A second, hidden PowerShell watchdog closes the game if Claude exits. Their scripts and the browser path go in through environment variables behind a short encoded command, never spliced into a command line.
+- **Closes only its own windows.** A leftover game window is found by that profile folder in its command line, never by a saved process id.
+- **Readable helpers only.** Every helper is a file in [`scripts/`](scripts), run by its absolute path, without a shell and without inline or encoded code, from your home folder.
 
-### What it reaches
+## What it runs and sends
 
-From `claude plugin validate`:
+### Programs it starts
 
-| Network | Runs processes | Files | Calls a model | Submits prompts |
-| --- | --- | --- | --- | --- |
-| No (the browser loads the game page) | The browser; `ps` and `kill` on macOS and Linux (`kill -STOP`/`-CONT` freezes and resumes the game's own page process); `osascript` on macOS for the screen size, to bring the game back on your next prompt, and twice a second while the game is open to see which app is in front; `powershell` and `taskkill` on Windows (the launcher, the exit watchdog, the screen size, the chimes, finding and closing leftover game windows); `paplay` or `aplay` on Linux for the chime | Checks that browser and helper paths exist; on Windows writes `~/.bad-time/control/slot-N.txt`, the switch the launcher reads (bring the game back, show a banner). The browser keeps its own profile in `~/.bad-time/profiles/` | No | No |
+| Program | When | Why |
+| --- | --- | --- |
+| Chrome, Edge, Chromium or Brave, found at its usual install path (or `browserPath`) | Claude has worked for 2 s | Shows the game in its own window and profile (`--app`, `--user-data-dir=~/.bad-time/profiles/slot-N`) |
+| **Windows:** `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/windows-launcher.ps1` | With the game | Starts the browser with `Start-Process`; brings the game to the front on your next prompt; freezes the game's own page process (`NtSuspendProcess`) while its window isn't in front and resumes it after the countdown; draws the countdown and the CLAUDE NEEDS YOU / CLAUDE IS DONE banner; flashes Claude's taskbar button when Claude needs you. `Bypass` applies to this one process, so its own files run without changing your machine's policy |
+| **Windows:** `scripts/windows-watchdog.ps1`, started hidden by the launcher | With the game | Closes the game window if the launcher is gone (Claude exited) |
+| **Windows:** `scripts/windows-processes.ps1`, then `taskkill.exe` | At session start and when closing | Finds game windows left by a crashed session, by their bad-time profile folder, and closes them |
+| **Windows:** `scripts/windows-screen.ps1`, `scripts/windows-chime.ps1` | Opening the game; a chime | Reads the screen size to center the window; plays `sounds/ask.wav` or `sounds/done.wav` |
+| **macOS:** `/bin/ps`, `/bin/kill` | While the game is open | Finds the game's own processes by their profile folder; `kill -STOP` / `-CONT` freeze and resume the game's page while you're away; `-TERM` / `-KILL` close it |
+| **macOS:** `osascript -l JavaScript scripts/mac-front.js`, `mac-screen.js`, `mac-show.js` | Twice a second while the game is open; opening it; your next prompt | Which app is in front; the screen size; bring the game back to the front |
+| **Linux:** `ps`, `kill`, `paplay` or `aplay` | As above | Find and close the game; play a chime |
 
-Environment variables read: `HOME`, `PATH`, `OS`, `USERPROFILE`, `SystemRoot`, `ProgramFiles`, `ProgramFiles(x86)`, `LOCALAPPDATA`.
+### Network
+
+- **The mod itself makes no network requests.**
+- The game browser loads **https://jcw87.github.io/c2-sans-fight/** (Bad Time Simulator on GitHub Pages), or the address in the `url` setting, and whatever that page itself loads. It runs in a fresh profile with no logins or cookies. Nothing about you, your session, your prompts or your code is sent anywhere.
+
+### What it reads and writes
+
+- **Environment variables:** `HOME`, `PATH` (absolute entries only), `OS`, `USERPROFILE`, `SystemRoot`, `ProgramFiles`, `ProgramFiles(x86)`, `LOCALAPPDATA`, only to find your home folder, the browser and system tools.
+- **Files:** checks that the browser and helper programs exist; reads its own `scripts/` and `sounds/`. Writes only under `~/.bad-time/`: the browser profiles, and on Windows `control/slot-N.txt`, the switch the launcher reads (`show`, `ask`, `done`).
+- **Claude Code's plugin store:** whether bad-time is on, and which of the 4 window slots each session holds.
+- It never reads credentials, your code, your prompts or Claude's replies.
+
+### Hooks
+
+| Hook | What it does | Changes the event? |
+| --- | --- | --- |
+| `session.start` | Registers `/badtime`, closes leftover game windows of crashed sessions | No, returns `next(e)` |
+| `turn.start` | Opens the game, or brings it back, once Claude has worked 2 s | No |
+| `turn.complete` | Done chime, "Claude is done." notice, banner; in `close` mode closes the window after the countdown | No |
+| `classic.PermissionRequest` | Ask chime, "Claude needs you." notice, banner. Never decides the permission | No, always `return next(e)` |
+| `tool.call` (AskUserQuestion) | The same alert. Never answers the question | No, always `return next(e)` |
+| `prompt.submit` | Stray-key guard: a prompt typed by you within 1.5 s of the mod closing the game window goes back into the prompt box unsent | Only that case; off with `strayKeyGuard` |
+| `session.end` | Closes the game | No |
+| `command.run` (`badtime`) | Answers its own `/badtime` command | Only its own command |
+
+## Privacy
+
+bad-time collects nothing. It has no server, no analytics and no account. It does not read or send your prompts, code, files or Claude's replies. The only network traffic is the game page loading in its own browser window, from Jcw87's GitHub Pages site (or the `url` you set); that site's own privacy terms apply to that page. Everything the mod stores stays on your computer, under `~/.bad-time/` and in Claude Code's plugin store, and is removed with the plugin and that folder.
 
 ## Develop
 
@@ -82,6 +115,8 @@ Environment variables read: `HOME`, `PATH`, `OS`, `USERPROFILE`, `SystemRoot`, `
 claude plugin validate --strict .
 claude plugin test .
 ```
+
+Support and bug reports: [GitHub Issues](https://github.com/FatihBastan/bad-time/issues).
 
 ## Credits
 

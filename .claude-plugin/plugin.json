@@ -1,6 +1,7 @@
 {
   "name": "bad-time",
-  "version": "0.9.3",
+  "displayName": "bad-time",
+  "version": "1.0.0",
   "description": "Opens Bad Time Simulator (a fan game by Jcw87, recreating the Sans fight from UNDERTALE by Toby Fox) in its own window while Claude works. Not affiliated with either.",
   "author": {
     "name": "Fatih Baştan",
@@ -8,6 +9,9 @@
   },
   "homepage": "https://github.com/FatihBastan/bad-time",
   "repository": "https://github.com/FatihBastan/bad-time",
+  "supportUrl": "https://github.com/FatihBastan/bad-time/issues",
+  "documentationUrl": "https://github.com/FatihBastan/bad-time#readme",
+  "privacyPolicyUrl": "https://github.com/FatihBastan/bad-time#privacy",
   "license": "MIT",
   "keywords": [
     "mod",
@@ -18,36 +22,26 @@
     "onFinish": {
       "type": "string",
       "title": "When Claude finishes",
-      "description": "pause: one fight for the whole session; it stays where you leave it and comes back to the front on your next prompt. close: the window closes after Claude answers and every prompt starts a fresh fight.",
-      "options": [
-        "pause",
-        "close"
-      ],
+      "description": "pause or close. pause (default): one fight for the whole session; it stays where you leave it and comes back to the front on your next prompt. close: the window closes after Claude answers and every prompt starts a fresh fight.",
       "default": "pause"
     },
     "delaySeconds": {
       "type": "number",
       "title": "Delay before opening",
-      "description": "Seconds Claude must be working before the window opens. Shorter turns never open it.",
-      "default": 2,
-      "min": 0,
-      "max": 30
+      "description": "0 to 30. Seconds Claude must be working before the window opens; shorter turns never open it.",
+      "default": 2
     },
     "countdownSeconds": {
       "type": "number",
       "title": "Countdown before closing (close mode)",
-      "description": "With onFinish = close: seconds between the done chime and the window closing.",
-      "default": 3,
-      "min": 0,
-      "max": 10
+      "description": "0 to 10. With onFinish = close: seconds between the done chime and the window closing.",
+      "default": 3
     },
     "resumeDelaySeconds": {
       "type": "number",
       "title": "Grace before the fight resumes",
-      "description": "Seconds the fight stays frozen after you click back into the game, so you can get ready.",
-      "default": 2.5,
-      "min": 0,
-      "max": 10
+      "description": "0 to 10. Seconds the fight stays frozen after you click back into the game, so you can get ready.",
+      "default": 2.5
     },
     "sounds": {
       "type": "boolean",
@@ -64,7 +58,7 @@
     "windowSize": {
       "type": "string",
       "title": "Window size",
-      "description": "auto (centered, about 60% of the screen height), or WIDTHxHEIGHT such as 900x700. The window is resizable either way.",
+      "description": "auto (centered, about 60% of the screen height), or WIDTHxHEIGHT such as 900x700, 320 to 3840 each. The window is resizable either way.",
       "default": "auto"
     },
     "browserPath": {
@@ -76,7 +70,7 @@
     "url": {
       "type": "string",
       "title": "Game URL",
-      "description": "Must be https. Point it at a mirror if the original page is down.",
+      "description": "Must be an https:// address. Point it at a mirror if the original page is down.",
       "default": "https://jcw87.github.io/c2-sans-fight/"
     }
   }
